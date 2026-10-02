@@ -1,0 +1,120 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Build and verify · ${{ matrix.platform }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Standard hosted runner labels, verified against actions/runner-images.
+          - os: macos-15
+            platform: macos-arm64
+            arch: arm64
+            builder_args: --mac dmg --arm64
+            extension: dmg
+          - os: macos-15-intel
+            platform: macos-x64
+            arch: x64
+            builder_args: --mac dmg --x64
+            extension: dmg
+          - os: windows-2022
+            platform: windows-x64
+            arch: x64
+            builder_args: --win nsis --x64
+            extension: exe
+    runs-on: ${{ matrix.os }}
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      CLOUDHELM_EXPECTED_ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set Node before pnpm bootstrap
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - uses: actions/setup-python@v5
+        id: python
+        with:
+          python-version: '3.12'
+      - name: Configure Python for native addon builds
+        env:
+          BUILD_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: node -e "require('node:fs').appendFileSync(process.env.GITHUB_ENV, 'PYTHON=' + process.env.BUILD_PYTHON + '\n')"
+      - name: Verify runner architecture
+        run: node -e "if (process.arch !== process.env.CLOUDHELM_EXPECTED_ARCH) throw new Error('Unexpected runner architecture ' + process.arch); console.log(process.platform, process.arch, process.version)"
+      - name: Verify Windows C++ build tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installation) { throw 'Visual Studio C++ x64 build tools are unavailable' }
+          Write-Output "Native C++ tools: $installation"
+          'npm_config_msvs_version=2022' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Verify macOS C++ build tools
+        if: runner.os == 'macOS'
+        run: |
+          xcode-select --print-path
+          clang --version
+      - name: Install locked dependencies and approved native builds
+        run: pnpm install --frozen-lockfile
+      - name: Types, policies, and unit/integration tests
+        run: pnpm check
+      - name: Install browser for renderer smoke
+        run: pnpm exec playwright install chromium
+      - name: Renderer flows with fake SSH and models
+        run: pnpm test:ui
+      - name: Safe Markdown rendering and copy-only code blocks
+        run: pnpm test:markdown
+      - name: Build native desktop directory package
+        run: pnpm --filter @cloudhelm/desktop package
+      - name: Built Electron process and credential/native resources
+        run: pnpm test:desktop
+      - name: Packaged Electron process and credential/native resources
+        run: pnpm test:desktop:packaged
+      - name: Build unsigned DMG or NSIS distribution
+        run: pnpm --filter @cloudhelm/desktop exec electron-builder ${{ matrix.builder_args }} --publish never
+      - name: Save smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-${{ matrix.platform }}
+          include-hidden-files: true
+          path: |
+            .cache/ui-smoke/*.png
+            .cache/markdown-smoke/*.png
+            .cache/desktop-smoke/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Save unsigned desktop packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: CloudHelm-${{ matrix.platform }}
+          path: |
+            apps/desktop/dist/*.${{ matrix.extension }}
+            apps/desktop/dist/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

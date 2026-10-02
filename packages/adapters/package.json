@@ -1,0 +1,17 @@
+{
+  "name": "@cloudhelm/adapters",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@cloudhelm/core": "workspace:*",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "better-sqlite3": "13.0.3",
+    "drizzle-orm": "0.45.3",
+    "ssh2": "1.17.0",
+    "web-tree-sitter": "0.27.0"
+  },
+  "devDependencies": { "@types/better-sqlite3": "7.6.13", "@types/ssh2": "1.15.5", "tree-sitter-bash": "0.25.1" }
+}

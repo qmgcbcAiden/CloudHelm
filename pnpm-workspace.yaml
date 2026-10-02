@@ -1,0 +1,22 @@
+packages:
+  - apps/*
+  - packages/*
+overrides:
+  ssh2>cpu-features: '-'
+  ssh2>nan: '-'
+allowBuilds:
+  '@google/genai': false
+  better-sqlite3: true
+  electron: true
+  cpu-features: false
+  electron-winstaller: false
+  esbuild: true
+  protobufjs: false
+  ssh2: true
+  tree-sitter-bash: false
+minimumReleaseAgeExclude:
+  - '@earendil-works/chord@0.99.1'
+  - '@earendil-works/pi-agent-core@0.99.1'
+  - '@earendil-works/pi-ai@0.99.1'
+  - '@earendil-works/pi-telemetry@0.99.1'
+  - electron@44.5.1

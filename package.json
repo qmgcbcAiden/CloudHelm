@@ -1,0 +1,36 @@
+{
+  "name": "cloudhelm",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @cloudhelm/desktop dev",
+    "build": "pnpm --filter @cloudhelm/desktop build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "lint": "eslint apps packages scripts",
+    "lint:deps": "depcruise --config .dependency-cruiser.cjs apps packages",
+    "lint:lines": "node scripts/check-lines.mjs",
+    "check": "pnpm typecheck && pnpm test && pnpm lint && pnpm lint:deps && pnpm lint:lines",
+    "test:ui": "node scripts/ui-smoke.mjs",
+    "test:desktop": "node scripts/desktop-smoke.mjs",
+    "test:desktop:packaged": "node scripts/desktop-smoke.mjs --packaged",
+    "test:markdown": "node scripts/markdown-smoke.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.7.2",
+    "dependency-cruiser": "17.3.6",
+    "electron-vite": "5.0.0",
+    "eslint": "9.39.1",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.46.4",
+    "vite": "7.3.6",
+    "vitest": "3.2.4"
+  }
+}

@@ -1,0 +1,8 @@
+:root { --canvas: #1a1c1d; --panel: #242728; --raised: #303436; --border: #373b3d; --text: #e5e7e8; --muted: #9a9fa2; --accent: #83b7aa; }
+body { height: auto; min-height: 100vh; padding: 18px; background: var(--canvas); color: var(--text); }
+#root { height: auto; }
+.preview-card { max-width: 470px; padding: 20px; margin: 0 auto; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.preview-card > header { margin-bottom: 22px; font-size: 12px; color: var(--muted); }
+@media (prefers-color-scheme: light) {
+  :root { --canvas: #eef0f0; --panel: #fafbfb; --raised: #e7ebea; --border: #d6dcda; --text: #262d2a; --muted: #6d7672; --accent: #397d6b; }
+}

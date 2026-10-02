@@ -1,0 +1,35 @@
+.markdown { color: var(--text); font-size: 12px; line-height: 1.8; white-space: normal; overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: 8px 0; }
+.markdown h1, .markdown h2, .markdown h3, .markdown h4, .markdown h5, .markdown h6 { margin: 18px 0 8px; font-weight: 650; line-height: 1.5; }
+.markdown h1 { font-size: 20px; }
+.markdown h2 { font-size: 17px; }
+.markdown h3 { font-size: 14px; }
+.markdown h4, .markdown h5, .markdown h6 { font-size: 12px; }
+.markdown strong { font-weight: 650; }
+.markdown ul, .markdown ol { margin: 8px 0; padding-left: 22px; font-size: inherit; color: inherit; }
+.markdown li { margin: 4px 0; }
+.markdown li > p { margin: 4px 0; }
+.markdown input[type=checkbox] { margin-right: 7px; accent-color: var(--accent); }
+.markdown blockquote { margin: 12px 0; padding: 3px 12px; border-left: 3px solid var(--accent); color: var(--muted); background: var(--canvas); border-radius: 0 5px 5px 0; }
+.markdown blockquote p { margin: 5px 0; }
+.markdown a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.markdown a:hover { text-decoration-thickness: 2px; }
+.markdown a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.disabledLink { color: inherit; }
+.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
+.inlineCode { padding: 2px 5px; border: 1px solid var(--border); border-radius: 4px; background: var(--canvas); font-family: 'SFMono-Regular', Consolas, monospace; font-size: .92em; }
+.codeBlock { margin: 12px 0; overflow: hidden; border: 1px solid var(--border); border-radius: 9px; background: var(--canvas); }
+.codeHeader { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 32px; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 10px; color: var(--muted); }
+.codeHeader button { padding: 3px 6px; border: 0; border-radius: 4px; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.codeHeader button:hover { color: var(--text); background: var(--raised); }
+.markdown .codeBlock pre { margin: 0; padding: 12px; overflow-x: auto; white-space: pre; word-break: normal; font-family: 'SFMono-Regular', Consolas, monospace; font-size: 11px; line-height: 1.65; }
+.markdown .codeBlock code { padding: 0; border: 0; border-radius: 0; background: transparent; font: inherit; }
+.copyStatus { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.tableScroll { overflow-x: auto; margin: 12px 0; border: 1px solid var(--border); border-radius: 7px; }
+.markdown table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.markdown th, .markdown td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+.markdown th { font-weight: 600; background: var(--raised); }
+.markdown tr:last-child td { border-bottom: 0; }
+.imageLink { display: inline-block; padding: 3px 7px; margin: 3px 0; border: 1px solid var(--border); border-radius: 5px; font-size: 11px; }
