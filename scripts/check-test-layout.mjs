@@ -5,7 +5,7 @@ import process from 'node:process';
 import console from 'node:console';
 
 const generated = new Set(['node_modules', 'out', 'dist', 'build', 'coverage', 'vendor']);
-const testFile = /\.(?:test|spec)\.[cm]?[jt]sx?$|\.snap$|(?:^|-)fixture\.[cm]?[jt]sx?$/u;
+const testFile = /\.(?:test|spec)\.[cm]?[jt]sx?$|_test\.go$|\.snap$|(?:^|-)fixture\.[cm]?[jt]sx?$/u;
 const testDirectory = /^(?:tests|__tests__|__mocks__|__snapshots__|fixtures|.+-fixture)$/iu;
 
 /** Keep test-only sources out of production and engineering-script directories. */

@@ -80,7 +80,8 @@ export class HostSerialExecutor implements OperationExecutor {
       if (signal?.aborted || options?.isAuthorized?.() === false) {
         return { operationId: operation.id, status: 'failed', effects: 'none', stdoutTail: 'Authorization expired while waiting for the host write lock; no operation was sent' };
       }
-      if (this.unsettled.has(hostId) && !options?.readOnly) {
+      if (this.unsettled.has(hostId) && !options?.readOnly
+        && !(operation.kind === 'runtime' && operation.runtime.purpose === 'recover' && ['install', 'launch'].includes(operation.runtime.action))) {
         const blockedBy = [...this.unsettled.get(hostId)!.keys()].slice(0, 3).join(', ');
         return { operationId: operation.id, status: 'failed', effects: 'none', failureKind: 'unresolved-prior-operation',
           stdoutTail: `Another command on this host has an unresolved remote outcome (${blockedBy}); verify it before further Agent writes` };

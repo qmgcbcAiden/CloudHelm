@@ -15,67 +15,6 @@ vi.mock('ssh2', async () => {
 const host: SshHost = { id: 'host', label: 'test', address: 'localhost', port: 22, username: 'test', auth: 'password', fingerprint: 'test' };
 beforeEach(() => { state.clients.length = 0; state.sftp = {}; });
 
-function sftpFixture(existing: boolean, afterWrite: () => void) {
-  const directory = { isDirectory: () => true, isSymbolicLink: () => false };
-  const file = { isDirectory: () => false, isSymbolicLink: () => false, size: 3, mode: 0o600 };
-  const write = vi.fn((_path: string, _data: Buffer, _options: unknown, callback: (error: null) => void) => { afterWrite(); callback(null); });
-  const rename = vi.fn((_from: string, _to: string, callback: (error: null) => void) => callback(null));
-  const unlink = vi.fn((_path: string, callback: (error: null) => void) => callback(null));
-  state.sftp = {
-    lstat: (target: string, callback: (error: unknown, result?: unknown) => void) => {
-      if (target === '/srv' || target === '/srv/app') callback(null, directory);
-      else if (existing) callback(null, file);
-      else callback({ code: 2 });
-    },
-    readFile: (_path: string, callback: (error: null, value: Buffer) => void) => callback(null, Buffer.from('old')),
-    writeFile: write, ext_openssh_rename: rename, unlink, end: vi.fn()
-  };
-  return { write, rename, unlink };
-}
-
-describe('SFTP commit authorization', () => {
-  it('rejects a symbolic-link parent before reading a script or staging a structured write', async () => {
-    const calls = sftpFixture(false, () => {});
-    const read = vi.fn();
-    state.sftp.readFile = read;
-    state.sftp.lstat = (target: string, callback: (error: null, result: unknown) => void) => callback(null,
-      target === '/srv/app' ? { isDirectory: () => true, isSymbolicLink: () => true }
-        : { isDirectory: () => true, isSymbolicLink: () => false });
-    const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-    await expect(ssh.inspectScript('host', '/srv/app/setup.sh')).rejects.toThrow('Unsafe or missing parent');
-    await expect(ssh.writeFile('host', '/srv/app/file', Buffer.from('new'))).rejects.toMatchObject({ effects: 'none' });
-    expect(read).not.toHaveBeenCalled();
-    expect(calls.write).not.toHaveBeenCalled();
-  });
-
-  it('does not rename or clean up a staged write after authorization is revoked', async () => {
-    let authorized = true;
-    const calls = sftpFixture(false, () => { authorized = false; });
-    const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-    await expect(ssh.writeFile('host', '/srv/app/file', Buffer.from('new'), () => {
-      if (!authorized) throw new Error('authorization revoked');
-    })).rejects.toThrow('authorization revoked');
-    expect(calls.write).toHaveBeenCalledOnce(); expect(calls.rename).not.toHaveBeenCalled(); expect(calls.unlink).not.toHaveBeenCalled();
-  });
-
-  it('does not unlink a target when takeover happens during backup creation', async () => {
-    let authorized = true;
-    const calls = sftpFixture(true, () => { authorized = false; });
-    const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-    await expect(ssh.deleteFile('host', '/srv/app/file', () => {
-      if (!authorized) throw new Error('taken over');
-    })).rejects.toThrow('taken over');
-    expect(calls.write).toHaveBeenCalledOnce(); expect(calls.unlink).not.toHaveBeenCalled();
-  });
-
-  it('makes no SFTP mutation when the final guard has already expired', async () => {
-    const calls = sftpFixture(false, () => {});
-    const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-    await expect(ssh.writeFile('host', '/srv/app/file', Buffer.from('new'), () => { throw new Error('expired'); })).rejects.toThrow('expired');
-    expect(calls.write).not.toHaveBeenCalled(); expect(calls.rename).not.toHaveBeenCalled(); expect(calls.unlink).not.toHaveBeenCalled();
-  });
-});
-
 describe('SSH connection generations', () => {
   it('invalidates only the active connection and ignores stale close events', async () => {
     const disconnected = vi.fn(); const ssh = new SshTransport(disconnected);
@@ -108,30 +47,10 @@ describe('SSH connection generations', () => {
   });
 });
 
-it('reports a denied preflight read as having no remote effects', async () => {
-  const calls = sftpFixture(false, () => {});
-  state.sftp.lstat = (_path: string, callback: (error: unknown) => void) => callback({ code: 3 });
+it('requires a previously authorized native runtime rather than preparing a Python helper', async () => {
   const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-  await expect(ssh.writeFile('host', '/srv/app/file', Buffer.from('new'))).rejects.toMatchObject({ effects: 'none', permissionDenied: true });
-  expect(calls.write).not.toHaveBeenCalled(); expect(calls.rename).not.toHaveBeenCalled();
-});
-
-it('retains possible effects when staging already began before failure', async () => {
-  sftpFixture(false, () => {});
-  state.sftp.writeFile = (_path: string, _data: Buffer, _options: unknown, callback: (error: unknown) => void) => callback({ code: 3 });
-  const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-  await expect(ssh.writeFile('host', '/srv/app/file', Buffer.from('new'))).rejects.toMatchObject({ effects: 'possible', permissionDenied: true });
-});
-
-it('caches only successful Python preflight per SSH connection generation', async () => {
-  const ssh = new SshTransport(); await ssh.connect(host, { password: 'synthetic-test' });
-  sftpFixture(false, () => {});
-  const fixed = vi.spyOn(ssh, 'execFixed').mockImplementation(async (_host, command) => ({ exitCode: 0,
-    output: command.startsWith('python3') ? '' : '/usr/bin/python3\n/tmp/cloudhelm-run.fixture\n' }));
-  await ssh.prepareCommandProgram('host', 'fixed', () => {});
-  await ssh.prepareCommandProgram('host', 'fixed', () => {});
-  expect(fixed.mock.calls.filter(([, command]) => command.startsWith('python3'))).toHaveLength(1);
-  ssh.disconnect('host'); await ssh.connect(host, { password: 'synthetic-test' });
-  await ssh.prepareCommandProgram('host', 'fixed', () => {});
-  expect(fixed.mock.calls.filter(([, command]) => command.startsWith('python3'))).toHaveLength(2);
+  const fixed = vi.spyOn(ssh, 'execFixed');
+  await expect(ssh.prepareCommandProgram('host', 'fixed', () => {})).rejects.toThrow('authorized native runtime');
+  expect(fixed).not.toHaveBeenCalled();
+  expect('writeFile' in ssh).toBe(false); expect('deleteFile' in ssh).toBe(false);
 });

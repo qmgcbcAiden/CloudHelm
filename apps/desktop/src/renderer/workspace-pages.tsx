@@ -1,4 +1,5 @@
 import { MessageContent } from './message-content.js';
+import { FileOperationPreview } from './file-operation-preview.js';
 import { PrivilegeFeedback } from './privilege-feedback.js';
 import { VerificationChecks } from './verification-checks.js';
 import { VerificationFactsCard, VerificationHistory } from './verification-facts-card.js';
@@ -76,6 +77,7 @@ export function OperationCard({ operation, report }: { operation: OperationView;
   return <section className={styles.operationCard} onContextMenu={(event) => openContextMenu(event, menuEntries(), '操作详情')}>
     <div className={styles.cardTitle}><Icon name="terminal" /><strong>{operation.kind === 'command' ? '远程命令' : '文件操作'}</strong><small>{operation.reconciliation?.kind === 'risk-accepted' ? '风险已接管' : statuses[operation.status]}</small></div>
     <pre className={styles.command}>{operation.preview}</pre>
+    {operation.fileTransactionId && <FileOperationPreview operationId={operation.id} report={report} />}
     <PrivilegeFeedback value={operation.privilege} />
     {output && <pre className={styles.outputTail}>{output.slice(-1600)}</pre>}
     {operation.manualReviewAvailable && operation.ruleId === 'ai-review-deny' && <div className={styles.cardActions}>

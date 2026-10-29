@@ -1,0 +1,6 @@
+.added { color: var(--success, #72c9a6); }
+.removed { color: #dfa299; }
+@media (prefers-color-scheme: light) {
+  .added { color: #187443; }
+  .removed { color: #ab5649; }
+}

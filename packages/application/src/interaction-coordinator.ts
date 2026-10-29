@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { InputRequest, TerminalLease } from '@cloudhelm/core';
+import { isPrivateInputAnswer, privateAnswerValue, type InputRequest, type PrivateInputAnswer, type TerminalLease } from '@cloudhelm/core';
 
 export interface InteractionSink {
-  deliver(request: InputRequest, answer: string): Promise<boolean>;
+  deliver(request: InputRequest, answer: PrivateInputAnswer): Promise<boolean>;
   isWaiting(request: InputRequest): boolean;
 }
 
@@ -32,7 +32,8 @@ export class InteractionCoordinator {
     });
   }
 
-  async answer(requestId: string, answer: string): Promise<boolean> {
+  async answer(requestId: string, answer: PrivateInputAnswer): Promise<boolean> {
+    if (!isPrivateInputAnswer(answer)) return false;
     const pending = this.pending.get(requestId);
     if (!pending) return false;
     const { request, sink } = pending;
@@ -41,7 +42,11 @@ export class InteractionCoordinator {
       this.close(requestId, 'expired');
       return false;
     }
-    if (request.kind === 'confirmation' && !request.choices?.includes(answer)) return false;
+    const value = privateAnswerValue(answer);
+    if (value === null) { this.close(requestId, 'canceled'); return true; }
+    if (request.kind === 'confirmation' && !request.choices?.includes(value)) return false;
+    if (typeof answer === 'object' && answer !== null && answer.action === 'submit' && answer.cacheAsPassword
+      && (!request.allowPasswordCache || request.kind !== 'secret')) return false;
     this.pending.delete(requestId);
     clearTimeout(pending.timeout);
     this.publisher.closed(requestId);

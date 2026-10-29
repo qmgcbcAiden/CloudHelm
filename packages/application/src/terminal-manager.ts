@@ -1,6 +1,6 @@
 import { CommandNotStartedError } from '@cloudhelm/core';
 import { randomUUID } from 'node:crypto';
-import type { ExecutionOptions, OperationExecutor, OperationResult, ProposedOperation, RawTerminal, TerminalLease } from '@cloudhelm/core';
+import type { AuthenticationChallenge, ExecutionOptions, OperationExecutor, OperationResult, ProposedOperation, RawTerminal, TerminalLease } from '@cloudhelm/core';
 import { operationFingerprint } from '@cloudhelm/core';
 import { OperationOutputCapture } from './operation-output-capture.js';
 
@@ -52,8 +52,8 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
     channel.onData((data) => this.receive(terminal, data));
     channel.onDisplay?.((data) => this.events.data(terminal.id, data));
     channel.onClose(() => this.closeRecord(terminal));
-    channel.onExecutionFailure?.((failure) => { if (terminal.pending) terminal.pending.failure = failure; });
-    channel.onExit?.((code) => this.complete(terminal, code));
+    channel.agent?.onExecutionFailure?.((failure) => { if (terminal.pending) terminal.pending.failure = failure; });
+    channel.agent?.onExit?.((code) => this.complete(terminal, code));
     this.events.state(terminal.id, terminal.owner);
     return terminal.id;
   }
@@ -74,23 +74,22 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
     };
   }
 
-  subscribeAuthentication(id: string, listener: (challenge: { id: string; prompt?: string }) => void): () => void {
+  subscribeAuthentication(id: string, listener: (challenge: AuthenticationChallenge) => void): () => void {
     const channel = this.require(id).channel;
-    channel.onAuthentication?.(listener);
-    return () => channel.onAuthentication?.(() => {});
+    channel.agent?.onAuthentication?.(listener);
+    return () => channel.agent?.onAuthentication?.(() => {});
   }
 
   answerAuthentication(id: string, operationId: string, challengeId: string, answer: string | null): boolean {
     const terminal = this.require(id);
     if (terminal.pending?.operationId !== operationId || (answer !== null && terminal.owner !== 'agent')) return false;
-    return terminal.channel.answerAuthentication?.(challengeId, answer) ?? false;
+    return terminal.channel.agent?.answerAuthentication?.(challengeId, answer) ?? false;
   }
 
-  confirmInput(id: string, operationId: string, answer: string): boolean {
+  confirmInput(id: string, operationId: string, answer: 'y\n' | 'n\n'): boolean {
     const terminal = this.require(id);
     if (terminal.pending?.operationId !== operationId || terminal.owner !== 'agent') return false;
-    terminal.channel.write(answer);
-    return true;
+    return terminal.channel.agent?.confirmInput?.(operationId, answer) ?? false;
   }
 
   hasPending(id: string): boolean { return !!this.terminals.get(id)?.pending; }
@@ -104,10 +103,16 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
 
   input(id: string, data: string, humanIntent: boolean): void {
     const terminal = this.require(id);
-    if (!humanIntent) { if (this.isProtocolResponse(data)) terminal.channel.write(data); return; }
+    if (!humanIntent) {
+      if (!this.isProtocolResponse(data)) return;
+      if (terminal.pending) terminal.channel.agent?.respondToTerminalQuery?.(terminal.pending.operationId, data);
+      else if (terminal.owner === 'human') terminal.channel.human?.respondToTerminalQuery?.(data);
+      return;
+    }
     if (terminal.owner !== 'human' || terminal.pending) throw new Error('终端暂不可输入，请先停止 AI 并等待命令退出');
+    if (!terminal.channel.human) throw new Error('此执行会话没有人工输入端口，请打开独立 SSH 终端');
     if (!terminal.commandRunning && /[\r\n]/u.test(data)) this.events.command?.(terminal.id, terminal.generation, { phase: 'unavailable' });
-    terminal.channel.write(data);
+    terminal.channel.human.write(data);
   }
 
   takeOver(id: string): void {
@@ -140,13 +145,15 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
   }
 
   resize(id: string, cols: number, rows: number): void {
-    this.require(id).channel.resize(cols, rows);
+    const terminal = this.require(id);
+    if (terminal.pending || terminal.owner === 'agent' || terminal.owner === 'suspended') terminal.channel.agent?.resize?.(cols, rows);
+    else terminal.channel.human?.resize(cols, rows);
   }
 
   close(id: string): void {
     const terminal = this.require(id);
     this.suspend(id);
-    terminal.channel.close();
+    try { terminal.channel.close(); } finally { this.closeRecord(terminal); }
   }
 
   stopCommand(id: string): void {
@@ -154,7 +161,9 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
     if (!terminal.pending || terminal.pending.stopRequested) return;
     terminal.pending.stopRequested = true;
     // Only invoked by an explicit user stop action, never to recover a shell.
-    try { terminal.channel.write('\u0003'); } catch (error) { terminal.pending.stopRequested = false; throw error; } finally { this.suspend(id); }
+    try {
+      if (!terminal.channel.agent?.interrupt?.(terminal.pending.operationId)) throw new Error('此执行会话无法确认停止信号送达，请核验远端状态');
+    } catch (error) { terminal.pending.stopRequested = false; throw error; } finally { this.suspend(id); }
   }
 
   stopTaskCommands(taskId: string): void {
@@ -166,7 +175,20 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
   }
 
   closeHost(hostId: string): void {
-    for (const terminal of this.terminals.values()) if (terminal.hostId === hostId) this.close(terminal.id);
+    const errors: unknown[] = [];
+    for (const terminal of [...this.terminals.values()]) if (terminal.hostId === hostId) {
+      try { this.close(terminal.id); } catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw new Error('部分主机终端关闭失败，请核验远端状态');
+  }
+
+  /** A task may own older suspended/human generations as well as its current terminal. */
+  closeTask(taskId: string): void {
+    const errors: unknown[] = [];
+    for (const terminal of [...this.terminals.values()]) if (terminal.taskId === taskId) {
+      try { this.close(terminal.id); } catch (error) { errors.push(error); }
+    }
+    if (errors.length) throw new Error('部分任务终端关闭失败，请核验远端状态');
   }
 
   async execute(operation: ProposedOperation, fingerprint: string, signal?: AbortSignal, options?: ExecutionOptions): Promise<OperationResult> {
@@ -177,7 +199,7 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
       || operationFingerprint(operation) !== fingerprint || signal?.aborted || terminal.pending || options?.isAuthorized?.() === false) {
       throw new Error('Agent terminal authorization expired');
     }
-    if (!terminal.channel.execute) throw new Error('This terminal does not support direct process execution');
+    if (!terminal.channel.agent) throw new Error('This terminal does not expose an Agent execution capability');
     return new Promise<OperationResult>((resolve) => {
       let completeRemote!: (state: 'exited' | 'unknown') => void;
       const remoteCompletion = new Promise<'exited' | 'unknown'>((done) => { completeRemote = done; });
@@ -199,7 +221,10 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
       const current = () => !signal?.aborted && terminal.owner === 'agent'
         && terminal.generation === operation.scope.terminalGeneration && options?.isAuthorized?.() !== false;
       if (!terminal.channel.onDisplay) this.events.data(terminal.id, `$ ${operation.command}\r\n`);
-      void terminal.channel.execute!(operation.command, operation.scope.cwd, current).catch((error: unknown) => {
+      void terminal.channel.agent!.execute(operation.command, operation.scope.cwd, current, {
+        operationId: operation.id, sessionId: operation.scope.sessionId ?? terminal.id,
+        generation: operation.scope.terminalGeneration, plan: operation.executionPlan
+      }).catch((error: unknown) => {
         this.receive(terminal, error instanceof Error ? error.message : 'Command transport failed');
         if (error instanceof CommandNotStartedError && terminal.pending === pending) {
           pending.failure = { failureKind: 'unsupported', effects: 'none' };
@@ -233,6 +258,7 @@ export class TerminalManager implements TerminalLease, OperationExecutor {
   }
 
   private closeRecord(terminal: TerminalRecord): void {
+    if (terminal.owner === 'closed') return;
     terminal.owner = 'closed';
     terminal.generation++;
     // Publish loss of observability even if Stop already settled the tool call.

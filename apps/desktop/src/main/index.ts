@@ -1,3 +1,7 @@
+import { registerFileRecoveryIpc } from './file-recovery-ipc.js';
+import { createFilePreviewStore, registerApprovalIpc, registerFilePreviewIpc } from './file-preview-ipc.js';
+import { createFileJournalHandler } from './file-transaction-broker.js';
+import { commitRuntimeResource, markRuntimeResourcesUnknown } from './runtime-resource-journal.js';
 import { ReferenceStore } from './reference-store.js';
 import { DiagnosticLogger, diagnosticSettings } from './diagnostic-logger.js';
 import { join } from 'node:path';
@@ -6,7 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, shell } from 'electron';
 import { BashAnalyzer, SqliteStore, listModelProviders } from '@cloudhelm/adapters';
 import type { AppEvent, DesktopAPI, HostDraft, LocalScope } from '@cloudhelm/contracts';
-import { operationNeedsVerification } from '@cloudhelm/contracts';
+import { isPrivateInputAnswer, operationNeedsVerification } from '@cloudhelm/contracts';
 import { registerRecoveryIpc } from './recovery-ipc.js';
 import { AppState } from './app-state.js';
 import { registerHostSafetyIpc } from './host-safety-ipc.js';
@@ -155,14 +159,16 @@ function registerIpc(): void {
   ipcMain.handle('cloudhelm:terminal-protocol', (_event, terminalId: string, data: string) => runtime.call({ method: 'terminal-input', terminalId, data, humanIntent: false }));
   ipcMain.handle('cloudhelm:stop-terminal', (_event, terminalId: string) => runtime.call({ method: 'stop-terminal', terminalId }));
   ipcMain.handle('cloudhelm:resize', (_event, terminalId: string, cols: number, rows: number) => runtime.call({ method: 'resize', terminalId, cols, rows }));
-  ipcMain.handle('cloudhelm:decide-approval', (_event, approvalId: string, approved: boolean) => runtime.call({ method: 'decide-approval', approvalId, approved }));
   ipcMain.handle('cloudhelm:request-ai-denial-review', (_event, taskId: string, operationId: string) => {
     const operation = state.snapshot().operations.find((item) => item.id === operationId && item.taskId === taskId);
     if (!operation?.manualReviewAvailable || operation.ruleId !== 'ai-review-deny') throw new Error('该操作不可人工复核');
     return runtime.call({ method: 'request-ai-denial-review', taskId, operationId });
   });
 
-  ipcMain.handle('cloudhelm:answer-input', (_event, requestId: string, answer: string) => runtime.call({ method: 'answer-input', requestId, answer }));
+  ipcMain.handle('cloudhelm:answer-input', (_event, requestId: string, answer: unknown) => {
+    if (typeof requestId !== 'string' || !isPrivateInputAnswer(answer)) throw new Error('Invalid private input response');
+    return runtime.call({ method: 'answer-input', requestId, answer });
+  });
   ipcMain.handle('cloudhelm:cancel-input', (_event, requestId: string) => runtime.call({ method: 'cancel-input', requestId }));
   ipcMain.handle('cloudhelm:pause-task', (_event, taskId: string) => runtime.call({ method: 'pause-task', taskId }));
   ipcMain.handle('cloudhelm:list-remote', (_event, hostId: string, path: string) => runtime.call({ method: 'list-remote', hostId, path }));
@@ -213,8 +219,10 @@ void app.whenReady().then(async () => {
   if (process.platform === 'darwin') Menu.setApplicationMenu(macApplicationMenu());
   else Menu.setApplicationMenu(null);
   store = new SqliteStore(join(app.getPath('userData'), 'cloudhelm.sqlite'));
+  markRuntimeResourcesUnknown(store);
   state = new AppState(store, publish);
   references = new ReferenceStore(store, state);
+  const filePreviews = createFilePreviewStore(state);
   const diagnostics = new DiagnosticLogger(diagnosticSettings(!!process.env.ELECTRON_RENDERER_URL, process.env, app.getPath('userData')));
   diagnostics.write({ event: 'runtime.started', level: 'info' });
   runtime = new RuntimeBridge((event) => {
@@ -224,7 +232,12 @@ void app.whenReady().then(async () => {
       && (event.type === 'approval-open' || event.type === 'input-open')) {
       new Notification({ title: 'CloudHelm', body: 'AI 需要你处理一项请求。' }).show();
     }
-  }, (taskId, operationId, cursor) => state.readOperationLog(taskId, operationId, cursor), () => { diagnostics.write({ event: 'runtime.stopped', level: 'error' }); state.runtimeStopped(); }, (event) => diagnostics.write(event), (command) => state.requestBudget(command));
+  }, (taskId, operationId, cursor) => state.readOperationLog(taskId, operationId, cursor), () => { filePreviews.clear(); diagnostics.write({ event: 'runtime.stopped', level: 'error' }); markRuntimeResourcesUnknown(store); state.runtimeStopped(); }, (event) => diagnostics.write(event), (command) => state.requestBudget(command), createFileJournalHandler(store, (command) => {
+    if (command.kind === 'get') return;
+    const record = command.record;
+    const task = state.snapshot().conversations.find((item) => item.id === record.taskId);
+    if (!task || !task.hostIds.includes(record.hostId)) throw new Error('File journal task binding changed');
+  }), (record) => commitRuntimeResource(store, record), (value) => { filePreviews.put(value); });
   // Reclassify only provably read-only completed legacy commands before the
   // worker restores host locks. Ambiguous commands remain blocked.
   await state.normalizeHistoricalQueries(new BashAnalyzer());
@@ -232,6 +245,9 @@ void app.whenReady().then(async () => {
     .filter(operationNeedsVerification).map(({ id, hostId }) => ({ id, hostId })) });
   registerIpc();
   registerRecoveryIpc(state, runtime);
+  registerFileRecoveryIpc(state, runtime, store, connectHost);
+  registerFilePreviewIpc(filePreviews);
+  registerApprovalIpc(state, runtime, filePreviews);
   createWindow();
   app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); });
 }).catch((error: unknown) => {
@@ -250,7 +266,7 @@ const shutdown = new AppShutdown({
     return response === 1;
   },
   quit: () => app.quit(),
-  close: () => { runtime?.close(); state?.close(); store?.close(); }
+  close: () => { if (store) markRuntimeResourcesUnknown(store); runtime?.close(); state?.close(); store?.close(); }
 });
 app.on('before-quit', (event) => shutdown.beforeQuit(event));
 app.on('will-quit', () => shutdown.willQuit());

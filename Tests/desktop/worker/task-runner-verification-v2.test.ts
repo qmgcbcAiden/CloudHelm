@@ -8,7 +8,7 @@ import type { OperationView, TaskView, VerificationSubmissionV3 } from '@cloudhe
 import type { RuntimeHost } from '@cloudhelm/contracts/runtime';
 import { TaskRunner, type TaskSignals } from './task-runner-fixture.js';
 import { fixtureMessageText, openAiFixture } from './openai-sse-fixture.js';
-const channel: RawTerminal = { write() { throw new Error('No real shell'); }, resize() {}, close() {}, onData() {}, onClose() {} };
+const channel: RawTerminal = { close() {}, onData() {}, onClose() {} };
 it.each(['passed', 'failed', 'inconclusive'] as const)('records %s checks through native tools and finishes honestly without repeating changes', async (status) => {
   const directory = await mkdtemp(join(tmpdir(), 'cloudhelm-v2-report-'));
   let requests = 0;

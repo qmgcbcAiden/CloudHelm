@@ -15,6 +15,7 @@ const password = 'synthetic-docker-private-password';
 
 /** No socket or shell. Only the real application protocol is exercised. */
 class DockerTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
   commands: string[] = [];
   private exited?: (code: number | undefined) => void;
   private output?: (data: string) => void;
@@ -108,7 +109,8 @@ describe('Docker metadata incident regression without SSH or a real model', () =
       expect(f.fixture.errors).toEqual([]);
       expect(f.requests()).toBe(4);
       expect(f.channel.commands).toEqual([images, sudoImages, containers]);
-      expect(f.prompts).toHaveLength(1); // The second sudo call uses the bounded in-memory cache.
+      expect(f.prompts).toHaveLength(2); // No host cache opt-in: each sudo challenge requires private input.
+      expect(f.prompts.every((request) => request.allowPasswordCache === false)).toBe(true);
       expect(f.approval).not.toHaveBeenCalled();
       const operations = new Map<string, OperationView>();
       for (const event of f.events) if (event.type === 'operation') operations.set(event.value.id, event.value);

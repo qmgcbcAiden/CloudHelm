@@ -32,7 +32,7 @@ describe('backend enforcement of stopped remote work', () => {
       const terminal = new TerminalManager({ data() {}, state() {} });
       const write = vi.fn(() => { throw new Error('No real SSH writes'); });
       const openTerminal = vi.fn(async () => terminal.open(host.id,
-        { write, resize() {}, close() {}, onData() {}, onClose() {} }, task.id, '/home/ubuntu'));
+        { human: { open() {}, write, resize() {} }, close() {}, onData() {}, onClose() {} }, task.id, '/home/ubuntu'));
       const coordinator = new InteractionCoordinator(terminal, { opened() {}, closed() {} });
       const ssh = { connectionGeneration: () => 1 } as unknown as SshTransport;
       const bridge = new OperationInputBridge(terminal, ssh, coordinator);

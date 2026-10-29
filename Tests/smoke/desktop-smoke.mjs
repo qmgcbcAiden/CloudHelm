@@ -1,3 +1,4 @@
+import { verifyNativeBundle } from '../../scripts/verify-native-helper.mjs';
 /* global window, Buffer, setTimeout, clearTimeout */
 import { checkClarificationRuntime } from './check-clarification-runtime.mjs';
 import assert from 'node:assert/strict';
@@ -92,10 +93,11 @@ try {
       });
       probe.on('exit', (code) => { if (code !== 0) { clearTimeout(timeout); reject(new Error(`Native/WASM probe exited ${code}`)); } });
     });
-    return { packaged: app.isPackaged, appPath, native, safeStorageAvailable: available, credentialRoundtrip };
-  }, { packaged, grammarPath: path.join(desktop, 'resources/tree-sitter-bash.wasm'),
+    return { packaged: app.isPackaged, appPath, native, remoteNativePath: input.packaged ? `${process.resourcesPath}/native` : input.remoteNativePath, safeStorageAvailable: available, credentialRoundtrip };
+  }, { packaged, grammarPath: path.join(desktop, 'resources/tree-sitter-bash.wasm'), remoteNativePath: path.join(desktop, 'resources/native'),
     probePath: path.join(root, 'Tests/smoke/desktop-probe.mjs'), bundleDirectory: packaged ? '' : path.join(desktop, 'out/main') }),
   60_000, 'Native/WASM and credential probe');
+  await verifyNativeBundle(runtime.remoteNativePath);
   assert.equal(runtime.native.sqliteRoundtrip, true);
   assert.equal(runtime.native.wasmParsed, true);
   if (!packaged) {

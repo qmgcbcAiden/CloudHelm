@@ -1,4 +1,5 @@
 import type { AppEvent, ClarificationAnswer, ApprovalView, HostConnectionTestResult, HostView, InputRequestView, LocalScope, OperationView, ReviewMode, ReviewSelection, ResumeReason, TaskStatus, TaskView } from './index.js';
+import type { PrivateInputAnswer, SudoCachePolicy } from './private-input.js';
 
 export interface RuntimeHost extends HostView { secret?: string }
 export type RuntimeHostTestResult = Exclude<HostConnectionTestResult, { status: 'trust-required' }>
@@ -11,6 +12,8 @@ export interface RuntimeProfile { provider: string; modelId: string; baseUrl?: s
 export interface PreparedContext { beforeRevision: string; revision: string }
 
 export type RuntimeCall =
+  | { method: 'recover-file-transaction'; record: import('./file-transactions.js').FileTransactionViewRecord }
+  | { method: 'commit-file-recovery'; operation: OperationView }
   | { method: 'prepare-message'; taskId?: string; requestId: string; document: import('./message-content.js').MessageDocument; bodies: import('./message-content.js').ReferenceBody[]; profile: RuntimeProfile; usedTokens?: number; localScopes?: LocalScope[]; hosts?: HostView[] }
   | { method: 'cancel-message'; requestId: string }
 
@@ -31,7 +34,7 @@ export type RuntimeCall =
   | { method: 'set-conversation-model'; taskId: string; profile: RuntimeProfile }
   | { method: 'stop-operation'; taskId: string }
   | { method: 'has-task'; taskId: string }
-  | { method: 'update-host-safety'; hostId: string; mode: ReviewMode; protectedReadPaths: string[]; protectedWritePaths: string[]; revision: number }
+  | { method: 'update-host-safety'; hostId: string; mode: ReviewMode; protectedReadPaths: string[]; protectedWritePaths: string[]; revision: number; sudoCachePolicy?: SudoCachePolicy }
   | { method: 'open-terminal'; hostId: string }
   | { method: 'close-terminal'; terminalId: string }
   | { method: 'terminal-input'; terminalId: string; data: string; humanIntent: boolean }
@@ -42,7 +45,7 @@ export type RuntimeCall =
   | { method: 'authorize-task'; taskId: string; hosts: RuntimeHost[]; localScopes: LocalScope[]; prepared?: PreparedContext & { text: string } }
   | { method: 'task-message'; intent?: string; taskId: string; text: string; preparedRevision?: string; document?: import('./message-content.js').MessageDocument }
   | { method: 'decide-approval'; approvalId: string; approved: boolean }
-  | { method: 'answer-input'; requestId: string; answer: string }
+  | { method: 'answer-input'; requestId: string; answer: PrivateInputAnswer }
   | { method: 'cancel-input'; requestId: string }
   | { method: 'pause-task' | 'resume-task'; taskId: string }
   | { method: 'delete-task'; taskId: string };
@@ -50,6 +53,11 @@ export type RuntimeCall =
 export interface LogPage { text: string; nextCursor: number; more: boolean }
 
 export type RuntimeMessage =
+  | import('./file-previews.js').FilePreviewMessage
+  | import('./file-transactions.js').FileJournalRequest
+  | { fileJournalResult: import('./file-transactions.js').FileJournalResult }
+  | import('./runtime-resources.js').RuntimeResourceRequest
+  | import('./runtime-resources.js').RuntimeResourceResult
   | import('./request-budget-runtime.js').BudgetRequestMessage
   | { budgetResult: import('./request-budget-runtime.js').BudgetResult }
   | { diagnostic: import('./diagnostics.js').DiagnosticRecord }

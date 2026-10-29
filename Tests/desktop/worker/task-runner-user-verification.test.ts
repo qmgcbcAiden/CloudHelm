@@ -29,7 +29,7 @@ it.each(['implicit', 'declared', 'wrong', 'truncated'] as const)('handles the ac
     provider: 'cloudhelm-custom', modelId: 'fixture', requestCount: 0, requestLimit: 100, createdAt: 1, updatedAt: 1 };
   const host: RuntimeHost = { id: 'host', label: 'fixture', address: '192.0.2.1', port: 22, username: 'user', auth: 'agent',
     status: 'connected', defaultMode: 'ask', protectedPaths: [], policyRevision: 1 };
-  const channel: RawTerminal = { write() { throw new Error('No real SSH input'); }, resize() {}, close() {}, onData() {}, onClose() {} };
+  const channel: RawTerminal = { close() {}, onData() {}, onClose() {} };
   const terminal = new TerminalManager({ data() {}, state() {} });
   const operations = new Map<string, OperationView>();
   const execute = vi.fn<OperationExecutor['execute']>(async (operation) => {

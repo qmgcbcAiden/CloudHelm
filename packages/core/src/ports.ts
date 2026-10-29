@@ -1,4 +1,5 @@
 import type { ApprovalRequest, CommandAnalysis, InputRequest, OperationResult, ProposedOperation, SafetyDecision } from './model.js';
+import type { CommandExecutionPlan } from './remote-runtime.js';
 
 export interface CommandAnalyzer {
   analyze(command: string): Promise<CommandAnalysis>;
@@ -53,19 +54,53 @@ export interface TerminalLease {
   isAgentOwner(terminalId: string): boolean;
 }
 
-export interface RawTerminal {
-  onCommand?(listener: (event: { phase: 'start' | 'end' | 'unavailable'; command?: string; exitCode?: number }) => void): void;
-  /** Separate process/control channel; command text is never rewritten as terminal input. */
-  execute?(command: string, cwd: string, isAuthorized: () => boolean): Promise<void>;
+export interface RawTerminalExecutionContext {
+  operationId: string;
+  sessionId: string;
+  generation: number;
+  plan?: CommandExecutionPlan;
+}
+
+export interface AuthenticationChallenge {
+  id: string;
+  /** Absent when the challenge has closed. Untrusted text belongs only in the private UI. */
+  prompt?: string;
+  /** Digest of the exact remote prompt bytes; display sanitization must not merge cache identities. */
+  promptSha256?: string;
+  mechanism?: 'sudo' | 'su' | 'ssh';
+  kind?: 'unknown' | 'password' | 'otp';
+  /** Stable identity of one sudo process, distinct from its successive challenges. */
+  processId?: string;
+}
+
+/** Business processes receive only operation-bound controls, never arbitrary human keystrokes. */
+export interface AgentExecutionPort {
+  execute(command: string, cwd: string, isAuthorized: () => boolean, context?: RawTerminalExecutionContext): Promise<void>;
+  confirmInput?(operationId: string, answer: 'y\n' | 'n\n'): boolean;
+  interrupt?(operationId: string): boolean;
+  respondToTerminalQuery?(operationId: string, data: string): boolean;
+  resize?(cols: number, rows: number): void;
   onExecutionFailure?(listener: (failure: Pick<OperationResult, 'failureKind' | 'effects' | 'privilege'>) => void): void;
   onExit?(listener: (exitCode: number | undefined) => void): void;
-  /** Prompt/command echo for the terminal only, separate from captured command output. */
-  onDisplay?(listener: (data: string) => void): void;
-  onAuthentication?(listener: (challenge: { id: string; prompt?: string }) => void): void;
+  onAuthentication?(listener: (challenge: AuthenticationChallenge) => void): void;
   answerAuthentication?(id: string, answer: string | null): boolean;
-  takeOver?(): void;
+}
+
+/** An independent interactive shell, activated only by explicit human input. */
+export interface HumanTerminalPort {
+  open(): void | Promise<void>;
   write(data: string): void;
   resize(cols: number, rows: number): void;
+  respondToTerminalQuery?(data: string): boolean;
+}
+
+/** Shared presentation and lifecycle; input authorities are separate capabilities. */
+export interface RawTerminal {
+  readonly agent?: AgentExecutionPort;
+  readonly human?: HumanTerminalPort;
+  onCommand?(listener: (event: { phase: 'start' | 'end' | 'unavailable'; command?: string; exitCode?: number }) => void): void;
+  onDisplay?(listener: (data: string) => void): void;
+  takeOver?(): void;
   close(): void;
   onData(listener: (data: string) => void): void;
   onClose(listener: () => void): void;

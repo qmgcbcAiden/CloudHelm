@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { HostDraft, HostView, ReviewMode } from '@cloudhelm/contracts';
+import type { HostDraft, HostView, ReviewMode, SudoCachePolicy } from '@cloudhelm/contracts';
 import { capture, Icon } from './ui-helpers.js';
 import { HostConnectionTestStatus, useHostConnectionTest } from './host-connection-test.js';
 import styles from './ui.module.css';
@@ -8,7 +8,7 @@ type DialogProps = { close(): void; report(value: string): void };
 export function HostDialog({ hosts, editing, close, report }: DialogProps & { hosts: HostView[]; editing?: HostView }): React.JSX.Element {
   const [draft, setDraft] = useState<HostDraft>(editing
     ? { label: editing.label, address: editing.address, port: editing.port, username: editing.username,
-      auth: editing.auth, privateKeyPath: editing.privateKeyPath, jumpHostId: editing.jumpHostId }
+      auth: editing.auth, privateKeyPath: editing.privateKeyPath, jumpHostId: editing.jumpHostId, runtimeDirectory: editing.runtimeDirectory }
     : { label: '', address: '', port: 22, username: '', auth: 'agent' });
   const [secret, setSecret] = useState('');
   const [saving, setSaving] = useState(false);
@@ -58,6 +58,9 @@ export function HostDialog({ hosts, editing, close, report }: DialogProps & { ho
     <label>跳板机<select value={draft.jumpHostId ?? ''} onChange={(event) => update({ jumpHostId: event.target.value || undefined })}>
       <option value="">直连（不使用跳板机）</option>{hosts.filter((host) => !host.jumpHostId && host.id !== editing?.id).map((host) => <option key={host.id} value={host.id}>{host.label}</option>)}
     </select></label>
+    <label>AI 临时执行目录（可选）<input value={draft.runtimeDirectory ?? ''}
+      onChange={(event) => update({ runtimeDirectory: event.target.value || undefined })} placeholder="默认 /tmp；填写远端绝对路径" /></label>
+    <small>此目录需允许当前账户创建并执行临时组件。若 /tmp 禁止执行，可指定其他目录；使用 su 时，目录及其上级还需由 root 拥有（如 /var/tmp）。没有可用目录时 AI 会停止，仍可使用人工 SSH。</small>
     {draft.auth !== 'agent' && <label>{draft.auth === 'password' ? 'SSH 密码' : '私钥口令（如有）'}
       <input type="password" autoComplete="new-password" data-sensitive-input="true" required={draft.auth === 'password' && (!editing || editing.auth !== 'password')}
         value={secret} onChange={(event) => setSecret(event.target.value)} placeholder={editing && editing.auth === draft.auth ? '留空保留现有凭据' : ''} /></label>}
@@ -77,11 +80,12 @@ export function SafetyDialog({ host, close, report }: DialogProps & { host: Host
   const [mode, setMode] = useState<ReviewMode>(host.defaultMode);
   const [readPaths, setReadPaths] = useState((host.protectedReadPaths ?? host.protectedPaths).join('\n'));
   const [writePaths, setWritePaths] = useState((host.protectedWritePaths ?? host.protectedPaths).join('\n'));
+  const [sudoCacheMode, setSudoCacheMode] = useState<SudoCachePolicy['mode']>(host.sudoCachePolicy?.mode ?? 'disabled');
   return <div className={styles.scrim}><form className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="safety-title"
     onSubmit={(event) => { event.preventDefault(); void capture(async () => {
       await window.cloudhelm.updateHostSafety(host.id, mode,
         readPaths.split('\n').map((value) => value.trim()).filter(Boolean),
-        writePaths.split('\n').map((value) => value.trim()).filter(Boolean)); close();
+        writePaths.split('\n').map((value) => value.trim()).filter(Boolean), sudoCacheMode); close();
     }, report); }}>
     <div className={styles.dialogHead}><h2 id="safety-title">{host.label} · 安全设置</h2><button type="button" aria-label="关闭" onClick={close}><Icon name="close" /></button></div>
     <p>这里设置新对话的默认档位；当前对话可在输入框旁单独切换。</p>
@@ -91,6 +95,9 @@ export function SafetyDialog({ host, close, report }: DialogProps & { host: Host
     <p className={styles.notice}>{mode === 'ai-review' ? '不确定操作由设置中显式选择的模型独立审核；高影响操作仍需你确认。' : mode === 'permissive' ? 'SSH 黑名单和路径扫描只能尽力识别，无法保证拦截脚本内部的危险操作。' : '普通写入自动执行，只询问高影响或无法确认影响的操作。'}</p>
     <label>禁止 AI 读取的路径（每行一个绝对路径）<textarea rows={4} value={readPaths} onChange={(event) => setReadPaths(event.target.value)} placeholder={'/srv/private\n/home/user/.ssh'} /></label>
     <label>禁止 AI 写入的路径（每行一个绝对路径）<textarea rows={4} value={writePaths} onChange={(event) => setWritePaths(event.target.value)} placeholder={'/srv/backup\n/etc/ssh'} /></label>
+    <label><input type="checkbox" checked={sudoCacheMode === 'single-password-auto'} onChange={(event) => setSudoCacheMode(event.target.checked ? 'single-password-auto' : 'disabled')} />
+      我确认此主机的 sudo 使用单密码认证，允许任务内自动复用已确认的密码</label>
+    <p>默认关闭。每次首次输入仍需明确勾选“这是可复用密码”；单次认证成功后仅在内存保留最多 5 分钟，绑定主机、身份和当前任务。验证码不应勾选；多次认证请求、提示变化、暂停或失败会清除。服务器认证策略改变时请关闭此选项。</p>
     <p>修改安全设置后，尚未执行的批准将失效。你手动输入的命令不受 AI 命令审核约束。</p>
     <div className={styles.dialogActions}><button type="button" onClick={close}>取消</button><button className={styles.primary}>保存</button></div>
   </form></div>;

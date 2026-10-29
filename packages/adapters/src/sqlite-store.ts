@@ -1,3 +1,4 @@
+import type { FileTransactionRecord } from '@cloudhelm/core';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { and, eq } from 'drizzle-orm';
@@ -196,6 +197,15 @@ export class SqliteStore {
         INSERT INTO schema_migrations(version, applied_at) VALUES (11, unixepoch());
       `);
     }).immediate();
+    this.raw.transaction(() => {
+      if (this.raw.prepare('SELECT 1 FROM schema_migrations WHERE version = 12').get()) return;
+      this.raw.exec(`
+        CREATE INDEX IF NOT EXISTS file_transaction_lookup ON records(json_extract(value, '$.hostId'), json_extract(value, '$.stage')) WHERE bucket = 'file-transactions';
+        CREATE INDEX IF NOT EXISTS runtime_resource_lookup ON records(json_extract(value, '$.taskId')) WHERE bucket = 'runtime-resources';
+        UPDATE records SET value = json_set(value, '$.sudoCachePolicy', json('{"mode":"disabled","revision":1}')) WHERE bucket = 'hosts';
+        INSERT INTO schema_migrations(version, applied_at) VALUES (12, unixepoch());
+      `);
+    }).immediate();
   }
 
   get<T>(bucket: string, id: string): T | undefined {
@@ -226,6 +236,30 @@ export class SqliteStore {
       for (const { bucket, id, value } of repair.changes) this.put(bucket, id, value);
       const receipt = this.raw.prepare('INSERT INTO data_repairs(name,version,record_id,applied_at) VALUES(?,?,?,?)');
       for (const id of repair.recordIds) receipt.run(repair.name, repair.version, id, Date.now());
+    }).immediate();
+  }
+
+  /** Durable CAS: only return after SQLite commits; duplicate ACK recovery is idempotent. */
+  commitFileTransaction(record: FileTransactionRecord, expectedRevision: number | null): FileTransactionRecord {
+    return this.raw.transaction(() => {
+      const prior = this.get<FileTransactionRecord>('file-transactions', record.id);
+      if (prior && JSON.stringify(prior) === JSON.stringify(record)) return prior;
+      if ((expectedRevision === null ? !!prior : prior?.revision !== expectedRevision)
+        || record.revision !== (expectedRevision ?? 0) + 1) throw new Error('File transaction revision conflict');
+      if (record.id !== record.plan.transactionId || (prior && (prior.fingerprint !== record.fingerprint
+        || prior.operationId !== record.operationId || prior.taskId !== record.taskId || prior.hostId !== record.hostId
+        || prior.loginAs !== record.loginAs || prior.runAs !== record.runAs
+        || JSON.stringify(prior.plan) !== JSON.stringify(record.plan)))) throw new Error('File transaction binding changed');
+      const transitions: Record<string, string[]> = { prepared: ['staged', 'confirmed', 'conflict', 'unknown'],
+        staged: ['committed', 'confirmed', 'conflict', 'unknown'], committed: ['confirmed', 'unknown'],
+        unknown: ['unknown', 'confirmed', 'conflict'], confirmed: [], conflict: [] };
+      if (prior && !transitions[prior.stage]?.includes(record.stage)) throw new Error('Invalid file transaction transition');
+      if (!prior && record.stage !== 'prepared') throw new Error('File transaction must begin with durable intent');
+      if (record.receipt && (record.receipt.transactionId !== record.id || record.receipt.fingerprint !== record.fingerprint)) throw new Error('Receipt binding changed');
+      if (['committed', 'confirmed'].includes(record.stage) && (!record.receipt
+        || record.receipt.targetSha256 !== record.plan.contentSha256 || record.receipt.deleted !== (record.plan.contentSha256 === undefined))) throw new Error('Confirmed transaction requires its bound receipt');
+      this.put('file-transactions', record.id, record);
+      return record;
     }).immediate();
   }
 

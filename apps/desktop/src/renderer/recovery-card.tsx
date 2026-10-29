@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { operationNeedsVerification, operationOutcomeResolvable, type AppSnapshot, type OperationView, type TaskView } from '@cloudhelm/contracts';
 import styles from './ui.module.css';
+import { FileRecoveryPanel } from './file-recovery-panel.js';
 
 const RISK_EXPLANATION = '用户在恢复卡明确知晓原远端操作结果未知且可能继续运行，自愿接管此项未决风险。';
 
@@ -47,10 +48,12 @@ function RecoveryItem({ operation, snapshot, conversation, current, remaining, r
       {log && <pre className={styles.outputTail}>{log.slice(-16_384)}</pre>}
       {log && !more && <small>日志已读完；输出本身不能证明命令退出或没有副作用。</small>}
     </details>
+    {operation.fileTransactionId && <FileRecoveryPanel transactionId={operation.fileTransactionId} view={operation.fileRecovery}
+      recover={(id) => window.cloudhelm.recoverFileTransaction(id)} report={report} />}
     {resolvable ? <div className={styles.cardActions}>
       <button disabled={busy} onClick={() => setDismissed(true)}>拒绝，保持阻断</button>
       <button disabled={busy} onClick={() => void acceptRisk()}>知晓风险，仅解除这条写入阻断</button>
-    </div> : <p>原操作仍在运行或审核中，不能解除；请等待真实退出。</p>}
+    </div> : operation.fileRecovery?.lockState === 'pending' ? <p>原提交已核验，写锁同步尚未确认；点击文件核验按钮可安全重试同步。</p> : <p>原操作仍在运行或审核中，不能解除；请等待真实退出。</p>}
     <small>风险确认不等于继续聊天。全部阻断项解除后，请点击对话顶部的「继续 AI」或发送消息；AI 不会自动重放原命令，新的命令仍须审核。</small>
   </section>;
 }
@@ -63,7 +66,7 @@ export function RecoveryCard({ snapshot, hostId, conversation, report }: {
   const current = snapshot.operations.filter((item) => item.taskId === conversation.id && item.hostId === hostId
     && item.failureKind === 'unresolved-prior-operation').at(-1);
   if (!current && !snapshot.operations.some((item) => item.taskId === conversation.id && item.hostId === hostId
-    && operationOutcomeResolvable(item))) return null;
+    && (operationOutcomeResolvable(item) || item.fileRecovery?.lockState === 'pending'))) return null;
   const blockers = snapshot.operations.filter((item) => item.hostId === hostId && operationNeedsVerification(item));
   if (!blockers.length) return null;
   return <RecoveryItem key={`${blockers[0]!.id}:${current?.id ?? ''}`} operation={blockers[0]!} snapshot={snapshot}

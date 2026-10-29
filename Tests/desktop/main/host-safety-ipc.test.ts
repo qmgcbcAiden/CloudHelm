@@ -21,8 +21,8 @@ describe('host review mode IPC', () => {
     await Promise.all([invoke('update-host-safety', 'host', 'ai-review', ['/read'], ['/write']), invoke('update-host-review-mode', 'host', 'permissive')]);
     expect(host).toMatchObject({ defaultMode: 'permissive', protectedReadPaths: ['/read'], protectedWritePaths: ['/write'], policyRevision: 3 });
     expect(call.mock.calls).toEqual([
-      [{ method: 'update-host-safety', hostId: 'host', mode: 'ai-review', protectedReadPaths: ['/read'], protectedWritePaths: ['/write'], revision: 2 }],
-      [{ method: 'update-host-safety', hostId: 'host', mode: 'permissive', protectedReadPaths: ['/read'], protectedWritePaths: ['/write'], revision: 3 }]
+      [{ method: 'update-host-safety', hostId: 'host', mode: 'ai-review', protectedReadPaths: ['/read'], protectedWritePaths: ['/write'], revision: 2, sudoCachePolicy: { mode: 'disabled', revision: 1 } }],
+      [{ method: 'update-host-safety', hostId: 'host', mode: 'permissive', protectedReadPaths: ['/read'], protectedWritePaths: ['/write'], revision: 3, sudoCachePolicy: { mode: 'disabled', revision: 1 } }]
     ]);
   });
   it('retains authoritative mode on runtime failure and allows subsequent retry', async () => {
@@ -38,5 +38,17 @@ describe('host review mode IPC', () => {
     const { call } = setup();
     await expect(invoke('update-host-review-mode', 'host', 'root')).rejects.toThrow('Invalid safety');
     expect(call).not.toHaveBeenCalled();
+  });
+  it('requires explicit host cache opt-in and preserves it across review mode edits', async () => {
+    const { host, call } = setup();
+    await invoke('update-host-safety', 'host', 'ask', [], [], 'single-password-auto');
+    expect(host.sudoCachePolicy).toEqual({ mode: 'single-password-auto', revision: 2 });
+    await invoke('update-host-review-mode', 'host', 'permissive');
+    expect(host.sudoCachePolicy).toEqual({ mode: 'single-password-auto', revision: 2 });
+    await invoke('update-host-safety', 'host', 'ask', [], [], 'disabled');
+    expect(host.sudoCachePolicy).toEqual({ mode: 'disabled', revision: 3 });
+    expect(call).toHaveBeenCalledTimes(3);
+    await expect(invoke('update-host-safety', 'host', 'ask', [], [], 'all-passwords')).rejects.toThrow('Invalid safety');
+    expect(call).toHaveBeenCalledTimes(3);
   });
 });

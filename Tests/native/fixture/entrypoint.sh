@@ -12,17 +12,21 @@ if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
   ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
 fi
 awk '{ print "127.0.0.1 " $1 " " $2 }' /etc/ssh/ssh_host_ed25519_key.pub > /home/cloudhelm/.ssh/known_hosts
-cp /fixture/helper /home/cloudhelm/runtime/helper
-chmod 700 /home/cloudhelm/runtime/helper
+if [ "${CLOUDHELM_FIXTURE_EXTERNAL:-}" != 1 ]; then
+  cp /fixture/helper /home/cloudhelm/runtime/helper
+  chmod 700 /home/cloudhelm/runtime/helper
+fi
 chmod 600 /home/cloudhelm/.ssh/authorized_keys /home/cloudhelm/.ssh/known_hosts
 chown -R cloudhelm:cloudhelm /home/cloudhelm
 mkdir -p /root/.ssh /root/runtime
 chmod 700 /root/.ssh /root/runtime
 cp /home/cloudhelm/.ssh/authorized_keys /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
-cp /fixture/helper /root/runtime/helper
-chmod 700 /root/runtime/helper
-chmod 755 /fixture/process.test /fixture/files.test
+if [ "${CLOUDHELM_FIXTURE_EXTERNAL:-}" != 1 ]; then
+  cp /fixture/helper /root/runtime/helper
+  chmod 700 /root/runtime/helper
+  chmod 755 /fixture/process.test /fixture/files.test
+fi
 
 cat > /etc/ssh/sshd_config <<'SSHD'
 Port 22
@@ -38,6 +42,9 @@ PidFile /run/sshd.pid
 LogLevel ERROR
 Subsystem sftp /bin/false
 SSHD
+if [ "${CLOUDHELM_FIXTURE_EXTERNAL:-}" = 1 ]; then
+  sed -i 's/ListenAddress 127.0.0.1/ListenAddress 0.0.0.0/' /etc/ssh/sshd_config
+fi
 cat > /etc/sudoers <<'SUDOERS'
 Defaults env_reset,timestamp_timeout=0,passwd_tries=1
 root ALL=(ALL:ALL) ALL
@@ -57,6 +64,12 @@ until su -s /bin/sh cloudhelm -c 'ssh -oBatchMode=yes -oStrictHostKeyChecking=ye
   if [ "$attempt" -ge 20 ]; then cat /tmp/cloudhelm-sshd.log; exit 1; fi
   sleep 0.1
 done
+
+if [ "${CLOUDHELM_FIXTURE_EXTERNAL:-}" = 1 ]; then
+  touch /fixture-ready
+  wait "$sshd_pid"
+  exit $?
+fi
 
 if [ "${CLOUDHELM_FIXTURE_RESTRICTED_ROOT:-}" = 1 ]; then
   su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_RESTRICTED_ROOT=1 CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=30s -test.run=^TestRestrictedRootCopyFailsBeforeBusiness$'

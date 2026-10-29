@@ -27,7 +27,7 @@ describe('AI denial manual review', () => {
     const terminal = new TerminalManager({ data() {}, state() {} });
     const opened: string[] = [];
     const openTerminal = vi.fn(async () => {
-      const id = terminal.open(host.id, { write() {}, resize() {}, close() {}, onData() {}, onClose() {} }, task.id, '/srv/app');
+      const id = terminal.open(host.id, { close() {}, onData() {}, onClose() {} }, task.id, '/srv/app');
       opened.push(id);
       return id;
     });

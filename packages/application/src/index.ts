@@ -8,3 +8,6 @@ export * from './permission-aware-executor.js';
 export * from './sudo-credential-cache.js';
 export * from './prepare-message.js';
 export * from './prepare-message-context.js';
+
+export * from './file-transactions.js';
+export * from './file-recovery.js';

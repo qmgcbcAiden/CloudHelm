@@ -9,6 +9,7 @@ import { TaskRunner, type TaskSignals } from './task-runner-fixture.js';
 import { fixtureMessageText, openAiFixture } from './openai-sse-fixture.js';
 
 class SudoTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
   commands: string[] = [];
   private exited?: (code: number | undefined) => void;
   private output?: (data: string) => void;
@@ -89,7 +90,7 @@ describe('deployment sudo recovery through the model protocol, gate and authenti
       const task: TaskView = { id: 'bounded-query', goal: '检查状态', hostIds: ['host'], localScopes: [],
         provider: 'cloudhelm-custom', modelId: 'fixture', status: 'draft', requestCount: 0, requestLimit: 3, createdAt: 1, updatedAt: 1 };
       const terminal = new TerminalManager({ data() {}, state() {} });
-      const terminalId = terminal.open(host.id, { onData() {}, onClose() {}, write() {}, resize() {}, close() {} },
+      const terminalId = terminal.open(host.id, { onData() {}, onClose() {}, close() {} },
         task.id, '/home/ubuntu');
       const execute = vi.fn(async (...[operation]: Parameters<OperationExecutor['execute']>) => ({ operationId: operation.id,
         status: 'succeeded' as const, exitCode: 0, stdoutTail: 'ok' }));
@@ -139,7 +140,8 @@ describe('deployment sudo recovery through the model protocol, gate and authenti
     try {
       await runner.start();
       expect(fixture.errors).toEqual([]); expect(requests).toBe(3);
-      expect(prompts).toHaveLength(1);
+      expect(prompts).toHaveLength(first === 'sudo docker ps' ? 2 : 1);
+      expect(prompts.every((request) => request.allowPasswordCache === false)).toBe(true);
       // Capability probes are refused before review and never dispatched.
       expect(channel.commands).toEqual(first === 'sudo docker ps' ? [first, 'sudo docker compose build'] : ['sudo docker compose build']);
       expect(events.filter((event) => event.type === 'operation' && event.value.preview === 'sudo docker compose build').at(-1))

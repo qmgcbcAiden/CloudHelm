@@ -38,7 +38,7 @@ it('repairs one source reference without hand-maintained coverage or replaying b
     status: 'connected', defaultMode: 'ask', protectedPaths: [], policyRevision: 1 };
   const task: TaskView = { id: 'report-repair', goal: '创建目录并检查脚本', hostIds: ['host'], localScopes: [], status: 'draft',
     provider: 'cloudhelm-custom', modelId: 'fixture', requestCount: 0, requestLimit: 10, createdAt: 1, updatedAt: 1 };
-  const channel: RawTerminal = { write() { throw new Error('No real SSH or ordinary shell input'); }, resize() {}, close() {}, onData() {}, onClose() {} };
+  const channel: RawTerminal = { close() {}, onData() {}, onClose() {} };
   const terminal = new TerminalManager({ data() {}, state() {} });
   const events: Parameters<TaskSignals['event']>[0][] = [];
   const execute = vi.fn(async (operation: { id: string; command?: string }) => {

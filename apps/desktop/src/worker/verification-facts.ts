@@ -36,7 +36,7 @@ export function buildVerificationReport(input: {
   roundId: string; revision: number; operations: OperationView[]; all: OperationView[];
   submitted?: VerificationReport; checks?: GoalCheck[];
 }): VerificationReport {
-  const operations = mergeOperationViews(input.operations);
+  const operations = mergeOperationViews(input.operations).filter((operation) => operation.kind !== 'runtime');
   const all = mergeOperationViews(input.all);
   const execution = executionSummary(operations);
   const goalChecks = [...fileChecks(operations), ...automaticRunChecks(operations, input.checks ?? [], execution.recoveredAttemptIds ?? [])];
@@ -55,7 +55,7 @@ export function buildVerificationReport(input: {
       : runs.length ? 'execution-observed' : 'not-checked',
     impact: unresolvedOperationIds.length ? 'unresolved' : riskOperationIds.length ? 'risk-accepted'
       : operations.some((op) => op.readOnly !== true && op.effects !== 'none') ? 'not-assessed' : 'effect-free',
-    operations: operations.map((op) => ({ operationId: op.id, hostId: op.hostId, kind: op.kind, status: op.status, exitCode: op.exitCode, readOnly: op.readOnly })),
+    operations: operations.map((op) => ({ operationId: op.id, hostId: op.hostId, kind: op.kind === 'runtime' ? undefined : op.kind, status: op.status, exitCode: op.exitCode, readOnly: op.readOnly })),
     riskOperationIds, unresolvedOperationIds, uncheckedOperationIds };
   const observations = facts.goals === 'execution-observed' ? '已确认运行并保存输出；尚未比较输出与业务要求。'
     : facts.goals === 'passed' ? '已登记的具体检查通过，影响另列。' : '检查结论与缺失证据见下方具体记录。';

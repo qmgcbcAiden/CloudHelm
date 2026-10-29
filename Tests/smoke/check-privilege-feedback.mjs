@@ -37,7 +37,8 @@ export async function checkPrivilegeFeedback(page, screenshot) {
   assert.deepEqual((await form.getByRole('button').allTextContents()).slice(0, 3).map((text) => text.trim()), ['使用 sudo（推荐）', 'SSH 登录 root', '通过 su 切换 root']);
   await form.getByText(/直接su通常需要root密码/u).waitFor(); await screenshot('privilege-sudo-default-choice.png');
   await form.getByRole('button', { name: '使用 sudo（推荐）', exact: true }).click();
-  assert.ok((await windowCalls(page)).some((call) => call.kind === 'answer' && call.id === 'privilege-choice' && call.answer === '使用 sudo（推荐）'));
+  assert.ok((await windowCalls(page)).some((call) => call.kind === 'answer' && call.id === 'privilege-choice'
+    && call.answer?.action === 'submit' && call.answer.value === '使用 sudo（推荐）' && call.answer.cacheAsPassword === undefined));
   await page.reload();
 }
 function windowCalls(page) { return page.evaluate(() => window.fixture.calls); }

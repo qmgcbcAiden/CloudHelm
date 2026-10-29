@@ -187,10 +187,25 @@ async function exerciseInputIsolation() {
   await page.getByRole('button', { name: '取消', exact: true }).click();
   await page.evaluate(() => window.fixture.addInput());
   await page.getByRole('dialog', { name: '安装 Docker 需要管理员权限' }).waitFor();
-  await page.getByLabel('密码', { exact: true }).fill('test-sensitive-answer');
+  await page.getByLabel('认证信息', { exact: true }).fill('test-sensitive-answer');
+  assert.equal(await page.getByRole('checkbox', { name: /这是可复用密码/u }).count(), 0);
   await page.getByRole('button', { name: '安全提交', exact: true }).click();
-  assert.equal((await calls()).find((call) => call.kind === 'answer').answer, 'test-sensitive-answer');
+  assert.deepEqual((await calls()).find((call) => call.kind === 'answer').answer, { action: 'submit', value: 'test-sensitive-answer' });
   assert.equal((await calls()).filter((call) => call.kind === 'input').some((call) => call.data.includes('test-sensitive-answer')), false);
+  assert.equal(await page.evaluate(async () => JSON.stringify((await window.cloudhelm.snapshot()).messages).includes('test-sensitive-answer')), false);
+  await page.evaluate(() => window.fixture.addInput({ cache: true }));
+  const optIn = page.getByRole('checkbox', { name: /这是可复用密码/u });
+  await optIn.waitFor(); assert.equal(await optIn.isChecked(), false);
+  await page.getByLabel('认证信息', { exact: true }).fill('test-cache-password'); await optIn.check();
+  await page.getByRole('button', { name: '安全提交', exact: true }).click();
+  assert.deepEqual((await calls()).filter((call) => call.kind === 'answer').at(-1).answer,
+    { action: 'submit', value: 'test-cache-password', cacheAsPassword: true });
+  await page.evaluate(() => window.fixture.addInput({ cache: true, otp: true }));
+  await page.getByLabel('验证码', { exact: true }).fill('123456');
+  assert.equal(await page.getByRole('checkbox', { name: /这是可复用密码/u }).count(), 0);
+  await page.getByRole('button', { name: '安全提交', exact: true }).click();
+  assert.deepEqual((await calls()).filter((call) => call.kind === 'answer').at(-1).answer, { action: 'submit', value: '123456' });
+  assert.equal(await page.evaluate(async () => JSON.stringify((await window.cloudhelm.snapshot()).messages).includes('test-cache-password')), false);
 }
 
 async function exerciseAsyncErrors() {

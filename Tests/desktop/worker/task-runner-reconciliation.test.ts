@@ -10,6 +10,7 @@ import { TaskRunner, type TaskSignals } from './task-runner-fixture.js';
 import { fixtureMessageText, openAiFixture } from './openai-sse-fixture.js';
 
 class InspectionTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
   commands: string[] = [];
   private output?: (text: string) => void;
   private exit?: (code: number | undefined) => void;
@@ -78,7 +79,7 @@ it.each(['evidence', 'risk-accepted', 'acceptance-race'] as const)('restores %s 
   let runner: TaskRunner;
   const terminal = new TerminalManager({ data() {}, state() {}, completed: (result) => runner.recordRemoteResult(result) });
   const channel = new InspectionTerminal();
-  const terminalId = terminal.open(host.id, channel, task.id, '/');
+  let terminalId = terminal.open(host.id, channel, task.id, '/');
   const serial = new HostSerialExecutor(terminal);
   serial.restore([{ id: original.id, hostId: original.hostId }]);
   const reconcile = vi.spyOn(serial, 'reconcile');
@@ -95,6 +96,8 @@ it.each(['evidence', 'risk-accepted', 'acceptance-race'] as const)('restores %s 
     expect(fixture.requests, `Native fixture initialization status: ${task.status}; ${task.summary ?? ''}`).toHaveLength(1);
     expect(channel.commands).toEqual([]);
     runner.dispose();
+    expect(terminal.hostOf(terminalId)).toBeUndefined();
+    terminalId = terminal.open(host.id, channel, task.id, '/');
     runner = makeRunner(true);
     await runner.start(true);
     expect(fixture.requests).toHaveLength(1); // Loading history itself never dispatches a request.

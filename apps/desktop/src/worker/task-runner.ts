@@ -1,8 +1,13 @@
+import { bindCommandExecutionPlan, taskOperationScope } from './task-operation-scope.js';
+import { applyOperationCompletion } from './operation-completion.js';
+import { applyOperationDecision } from './operation-decision.js';
+import { operationPreview } from './operation-preview.js';
+import type { FileApprovalPreview } from '@cloudhelm/core';
 import { blockedOperationFeedback, operationToolResult } from './operation-feedback.js';
 import { decideTaskCompletion } from './task-completion.js';
 import { VerificationRoundTracker } from './verification-round.js';
 import { verificationSource } from './verification-source.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { PrivilegedTaskAccess } from './privileged-access.js';
 import { ClarificationCoordinator, SafetyGate, type TerminalManager } from '@cloudhelm/application';
 import { AiRiskEvaluator, BashAnalyzer, createConversationSession } from '@cloudhelm/adapters';
@@ -18,8 +23,8 @@ import { taskContextSnapshot } from './task-context.js';
 import { TaskProgress } from './task-progress.js';
 import { observeProgressTools } from './task-progress-observer.js';
 import { RequestBudgetError, PrivilegeError, privilegeGuidance } from '@cloudhelm/core';
-import { operationIntentKey, isReadOnlyQuery, isSudoStatusProbe, safeDiagnostic, serialCall, type ConversationSession, type SessionStorage, type DiagnosticEvent, sudoTarget, redactOutput, type OperationAudit, type OperationResult, type OperationExecutor, type OperationScope, type ProposedOperation, type SafetyDecision, type ScriptInspector } from '@cloudhelm/core';
-import type { ApprovalView, OperationView, InterruptionSource, UserInterruption, ReviewMode, ResumeReason, TaskStatus, TaskView } from '@cloudhelm/contracts';
+import { operationIntentKey, isReadOnlyQuery, isSudoStatusProbe, safeDiagnostic, serialCall, type ConversationSession, type SessionStorage, type DiagnosticEvent, redactOutput, type OperationAudit, type OperationResult, type OperationExecutor, type OperationScope, type ProposedOperation, type SafetyDecision, type ScriptInspector } from '@cloudhelm/core';
+import type { OperationView, InterruptionSource, UserInterruption, ReviewMode, ResumeReason, TaskStatus, TaskView } from '@cloudhelm/contracts';
 import { isActiveTaskStatus, operationNeedsVerification, operationOutcomeResolvable } from '@cloudhelm/contracts';
 import type { LocalScope } from '@cloudhelm/contracts';
 import type { RuntimeHost, RuntimeProfile } from '@cloudhelm/contracts/runtime';
@@ -29,12 +34,14 @@ import { applyCommittedRiskAcceptance } from './risk-acceptance.js';
 import { deriveInputIntent, TaskIntent } from './task-intent.js';
 import { createRemoteTools } from './remote-tools.js';
 import { createTaskPrompt } from './task-prompt.js';
-import { approvalPresentation } from './approval-presentation.js';
+import { FilePreviewPublisher } from './file-preview-publisher.js';
+import { approvalView } from './approval-view.js';
 import { inputPlan } from './operation-input-plan.js';
 import { WorkJournal } from './work-journal.js';
 import { LocalFileAccess } from './local-file-access.js';
 
 export class TaskRunner {
+  private readonly filePreviews = new FilePreviewPublisher((value) => this.signals.filePreview?.(value));
   private readonly clarification: ClarificationCoordinator;
   private profile: RuntimeProfile;
   private readonly journal: WorkJournal;
@@ -63,6 +70,7 @@ export class TaskRunner {
   private readonly openingTerminals = new Map<string, Promise<string>>();
   private readonly replayProtected = new Set<string>();
   private stopping = false;
+  private cleanupPromise?: Promise<void>;
   private status: TaskStatus = 'draft';
   private resumeReason?: ResumeReason;
   /** One remote operation at a time: a queued call re-checks activity after the previous finishes. */
@@ -82,7 +90,8 @@ export class TaskRunner {
     private readonly readLog: (operationId: string, cursor: number) => Promise<{ text: string; nextCursor: number; more: boolean }> = async () => ({ text: '', nextCursor: 0, more: false }),
     private readonly privileged?: PrivilegedTaskAccess,
     private readonly storage?: SessionStorage,
-    private readonly scripts?: ScriptInspector
+    private readonly scripts?: ScriptInspector,
+    private readonly prepareRemote?: (operation: ProposedOperation, gate: SafetyGate, signal?: AbortSignal) => Promise<{ operation: ProposedOperation; preview?: FileApprovalPreview }>
   ) {
     this.intent = new TaskIntent(task, (value) => signals.event({ type: 'task-intent', taskId: task.id, value }));
     const pendingReport = task.resumeReason === 'report' || (task.verificationState?.status === 'unverified' && !task.report);
@@ -122,7 +131,7 @@ export class TaskRunner {
       requestRoot: async (host, command, cwd, reason, signal, method) => {
         this.assertRemoteActive();
         if (!this.privileged) throw new Error('Root sessions unavailable');
-        try { return await this.privileged.request(host, command, cwd, reason, this.intent.goal(), gate, signal, this.intent.snapshot(), method); }
+        try { return await this.privileged.request(host, command, cwd, reason, this.intent.goal(), gate, signal, this.intent.snapshot(), method, 'execute', { conversationRevision: this.task.reviewRevision ?? 1, reviewerRevision: this.profile.reviewer?.revision ?? 1 }); }
         catch (error) { this.blockRemote(error instanceof PrivilegeError ? privilegeGuidance(error.feedback) : '提权上下文未建立；直接su通常需要root密码而非sudo密码。请处理后点击继续AI或明确发送下一步指令。', false, 'interrupted'); throw error; }
       }, scope: (host, id, cwd) => this.scope(host, id, cwd),
       runOperation: (gate, operation, signal, label) => this.runOperation(gate, operation, signal, label) }, gate);
@@ -240,6 +249,7 @@ export class TaskRunner {
 
   private async continueWithMessage(agent: ConversationSession, text: string, document?: import('@cloudhelm/core').MessageDocument): Promise<void> {
     try {
+      await this.cleanupPromise;
       if (this.needsRecovery) {
         await agent.context(recoveryContextMessage(this.operationViews()));
         this.needsRecovery = false;
@@ -285,6 +295,7 @@ export class TaskRunner {
 
   private async resumeOnce(version: number, reason: ResumeReason): Promise<void> {
     if (!this.agent) return;
+    await this.cleanupPromise;
     await this.agent.waitForIdle();
     if (version !== this.controlVersion) return;
     await this.budget.assertAvailable();
@@ -323,6 +334,8 @@ export class TaskRunner {
   async close(): Promise<void> {
     await this.agent?.abort();
     await this.agent?.waitForIdle();
+    this.privileged?.close();
+    await this.releaseRuntime();
     this.dispose();
   }
 
@@ -331,7 +344,8 @@ export class TaskRunner {
     this.agent?.dispose();
     this.signals.clearCredentials?.();
     this.privileged?.close();
-    for (const terminalId of this.terminalByHost.values()) if (this.terminal.taskOf(terminalId) === this.task.id) this.terminal.close(terminalId);
+    this.signals.abandonRuntime?.();
+    this.terminal.closeTask(this.task.id);
     this.terminalByHost.clear();
   }
 
@@ -360,7 +374,7 @@ export class TaskRunner {
     return pending;
   }
 
-  updateHostSafety(hostId: string, mode: ReviewMode, protectedReadPaths: string[], protectedWritePaths: string[], revision: number): void {
+  updateHostSafety(hostId: string, mode: ReviewMode, protectedReadPaths: string[], protectedWritePaths: string[], revision: number, sudoCachePolicy?: import('@cloudhelm/core').SudoCachePolicy): void {
     const host = this.hosts.find((candidate) => candidate.id === hostId);
     if (!host) return;
     this.signals.clearCredentials?.();
@@ -369,6 +383,7 @@ export class TaskRunner {
     host.protectedWritePaths = [...protectedWritePaths];
     host.protectedPaths = [...new Set([...protectedReadPaths, ...protectedWritePaths])];
     host.policyRevision = revision;
+    if (sudoCachePolicy) host.sudoCachePolicy = structuredClone(sudoCachePolicy);
   }
 
   updateConversationReviewMode(hostId: string, mode: ReviewMode, revision: number): void {
@@ -378,30 +393,27 @@ export class TaskRunner {
   }
 
   private scope(host: RuntimeHost, terminalId: string, cwd = this.terminal.workingDirectory(terminalId)): OperationScope {
-    return {
-      taskId: this.task.id, hostId: host.id, cwd, runAs: host.username, loginAs: host.username, ...this.privileged?.scope(terminalId),
-      terminalId, terminalGeneration: this.terminal.currentGeneration(terminalId), policyRevision: host.policyRevision,
-      conversationRevision: this.task.reviewRevision ?? 1,
-      reviewerRevision: this.profile.reviewer?.revision ?? 1,
-      allowedWorkingRoots: ['/srv', '/opt', `/home/${host.username}`, '/root'],
-      protectedPaths: [...host.protectedPaths], protectedReadPaths: [...(host.protectedReadPaths ?? host.protectedPaths)],
-      protectedWritePaths: [...(host.protectedWritePaths ?? host.protectedPaths)], goal: this.intent.goal(), intent: this.intent.snapshot()
-    };
+    return taskOperationScope(this.task, host, terminalId, cwd, this.terminal, this.profile, this.intent, this.privileged);
   }
 
   private async performOperation(gate: SafetyGate, operation: ProposedOperation, signal: AbortSignal | undefined,
     hostLabel: string, manualReview = false) {
     this.assertRemoteActive();
     operation = await this.privileged?.prepare?.(operation) ?? operation;
-    if (operation.kind === 'command' && !operation.scope.sessionId) {
-      // Identity is derived before fingerprinting, never by the renderer or after approval.
-      const analysis = await this.analyzer.analyze(operation.command).catch(() => undefined);
-      if (analysis?.steps?.length === 1) {
-        const target = sudoTarget(analysis.steps[0]!.call);
-        if (target) operation.scope.runAs = target.runAs;
-      }
-    }
     const analysis = operation.kind === 'command' ? await this.analyzer.analyze(operation.command).catch(() => undefined) : undefined;
+    // Refuse sudo capability probes before review: they deserve no approval card and no pause.
+    if (analysis && isSudoStatusProbe(analysis)) return blockedOperationFeedback(operation.id, 'unsupported-probe',
+      'No command sent; effects: none. sudo 状态/权限探测（sudo -n true、sudo -l、sudo -v 等）不被支持，也不能证明下一条 sudo 命令可用。请直接提交实际的有界 sudo 命令，私有认证通道会在需要时提示输入。');
+    // The authentication bridge cannot execute these forms. Refuse them before showing
+    // an approval card; an approval cannot make an unsupported transport safe to run.
+    if (analysis && operation.kind === 'command' && !operation.scope.sessionId && !inputPlan(analysis)
+      && analysis.calls.some((call) => /(?:^|\/)(?:sudo|su)$/u.test(call.name))) return blockedOperationFeedback(operation.id, 'unsupported-authentication-form',
+        'No command sent; effects: none. This sudo/su command form is unsupported by the private authentication channel (including sudo pipelines and redirections). Do not wrap or switch tools to bypass this limit. Submit the actual bounded sudo operation as one reviewed command, or explain that manual handling is required.');
+    if (operation.kind === 'command' && analysis) {
+      try { bindCommandExecutionPlan(operation, analysis); }
+      catch { return blockedOperationFeedback(operation.id, 'unsupported-authentication-form', 'No command sent; the authentication form cannot be represented by a bounded reviewed execution plan.'); }
+    }
+    // Lookup and audit must use the same finalized identities, including compound sudo targets.
     if (!analysis || !isReadOnlyQuery(analysis)) {
       const key = operationIntentKey(operation);
       const denied = !manualReview && this.operationViews().find((item) =>
@@ -412,18 +424,17 @@ export class TaskRunner {
         && (['running', 'proposed', 'approved', 'unknown'].includes(item.status) || (item.status === 'succeeded' && this.replayProtected.has(item.id))));
       if (previous) return blockedOperationFeedback(operation.id, 'replay-protected', `Not executed: operation ${previous.id} already records this action (${previous.status}). Read its log and inspect the actual result; do not replay it. A new operation ID does not make a retry safe.`, previous.id);
     }
-    // Refuse sudo capability probes before review: they deserve no approval card and no pause.
-    if (analysis && isSudoStatusProbe(analysis)) return blockedOperationFeedback(operation.id, 'unsupported-probe',
-      'No command sent; effects: none. sudo 状态/权限探测（sudo -n true、sudo -l、sudo -v 等）不被支持，也不能证明下一条 sudo 命令可用。请直接提交实际的有界 sudo 命令，私有认证通道会在需要时提示输入。');
-    // The authentication bridge cannot execute these forms. Refuse them before showing
-    // an approval card; an approval cannot make an unsupported transport safe to run.
-    if (analysis && operation.kind === 'command' && !operation.scope.sessionId && !inputPlan(analysis)
-      && analysis.calls.some((call) => /(?:^|\/)(?:sudo|su)$/u.test(call.name))) return blockedOperationFeedback(operation.id, 'unsupported-authentication-form',
-        'No command sent; effects: none. This sudo/su command form is unsupported by the private authentication channel (including sudo pipelines and redirections). Do not wrap or switch tools to bypass this limit. Submit the actual bounded sudo operation as one reviewed command, or explain that manual handling is required.');
-    const outcome = await gate.execute(operation, signal, manualReview);
+    let preview: FileApprovalPreview | undefined;
+    if (this.prepareRemote) {
+      const prepared = await this.prepareRemote(operation, gate, signal);
+      operation = prepared.operation; preview = prepared.preview;
+      this.assertRemoteActive();
+    }
+    const outcome = await this.filePreviews.execute(gate, operation, signal, manualReview, preview);
     if (!outcome.result) return blockedOperationFeedback(operation.id, outcome.decision.ruleId,
       `Executed: false; effects: none. SafetyGate ${outcome.decision.verdict} (${outcome.decision.ruleId}): ${outcome.decision.reason}`, undefined, outcome.readOnly);
     const result = outcome.result;
+    if (result.status !== 'succeeded') this.signals.clearCredentials?.();
     if (result.requiresUserAction) {
       this.blockRemote(result.privilege ? privilegeGuidance(result.privilege) : '认证未通过或当前认证形式需要人工接管，已暂停。请处理后手动继续，AI 不会自动改换方式重试。', false, 'interrupted');
     } else if (result.status === 'handed-over') {
@@ -435,7 +446,7 @@ export class TaskRunner {
     } else if (result.status === 'failed' && result.effects === 'possible' && outcome.readOnly !== true) {
       this.blockRemote('操作失败且可能已产生部分变更。已暂停，请先核验原结果，再决定后续操作。', false, 'verify');
     } else if (result.status === 'failed') {
-      const key = `${operation.scope.hostId}:${this.preview(operation)}:${result.exitCode ?? 'unknown'}`;
+      const key = `${operation.scope.hostId}:${operationPreview(operation)}:${result.exitCode ?? 'unknown'}`;
       this.sameFailureCount = key === this.lastFailureKey ? this.sameFailureCount + 1 : 1;
       this.lastFailureKey = key;
       if (this.sameFailureCount >= 3) {
@@ -454,13 +465,6 @@ export class TaskRunner {
     this.signals.diagnostic?.(safeDiagnostic({ ...event, taskId: this.task.id }));
   }
 
-  private preview(operation: ProposedOperation): string {
-    if (operation.kind === 'command') return redactOutput(operation.command);
-    if (operation.kind === 'write-file') return `写入文件 ${operation.path} · ${Buffer.byteLength(operation.content)} 字节 · SHA-256 ${createHash('sha256').update(operation.content).digest('hex')}`;
-    if (operation.kind === 'delete-path') return `删除文件 ${operation.path}`;
-    return `上传 ${operation.localPath} → ${operation.remotePath}`;
-  }
-
   private assertRemoteActive(): void {
     if (this.remoteBlocked || !['running', 'waiting-review'].includes(this.status)) {
       throw new Error(this.remoteBlocked ?? 'Task is paused; wait for an explicit user continuation.');
@@ -474,13 +478,14 @@ export class TaskRunner {
     this.agent?.abort();
   }
 
-  private createGate(): SafetyGate {
+  private createGate(maintenance = false): SafetyGate {
     const audit: OperationAudit = {
       proposed: async (operation) => {
         this.diagnostic({ event: 'operation.proposed', hostId: operation.scope.hostId, operationId: operation.id,
           runAs: operation.scope.runAs, loginAs: operation.scope.loginAs, sessionId: operation.scope.sessionId, cwd: operation.scope.cwd, policyRevision: operation.scope.policyRevision });
         this.proposedOperations.set(operation.id, operation);
         this.updateOperation(operation, 'proposed', await verificationSource(operation, this.analyzer));
+        this.filePreviews.proposed(operation);
       },
       classified: async (id, readOnly) => {
         const view = this.operations.get(id);
@@ -507,16 +512,7 @@ export class TaskRunner {
         this.proposedOperations.delete(result.operationId);
         const operation = this.operations.get(result.operationId);
         if (!operation) return;
-        operation.status = result.status === 'succeeded' ? 'succeeded' : result.status === 'failed' ? 'failed' : 'unknown';
-        operation.exitCode = result.exitCode;
-        operation.exitObserved = ['succeeded', 'failed'].includes(result.status) && Number.isInteger(result.exitCode);
-        operation.completedAt = operation.exitObserved ? operation.completedAt ?? Date.now() : undefined;
-        operation.outputCapture = result.outputCapture;
-        operation.authentication = result.authentication; operation.authenticationAttempts = result.authenticationAttempts;
-        operation.failureKind = result.failureKind; operation.effects = result.effects; operation.privilege = result.privilege;
-        operation.logRef = result.logRef;
-        operation.outputTail = redactOutput(result.stdoutTail);
-        if (operation.kind !== 'command' && result.stdoutTail) operation.reason = redactOutput(result.stdoutTail).slice(-2000);
+        applyOperationCompletion(operation, result);
         this.signals.event({ type: 'operation', value: operation });
         this.verification.pending(this.task.id, operation, this.operationViews());
         if (!this.isRunning()) this.journal.finalize(this.verification.id);
@@ -534,25 +530,18 @@ export class TaskRunner {
         baseUrl: this.profile.baseUrl, kind: 'current' }, createTaskReviewer(this.task.id, this.signals.budget, () => this.assertRemoteActive(), () => this.requestGeneration()),
       () => this.operationViews().slice(-5).map((item) => `${item.kind} ${item.status}: ${item.kind === 'command' ? redactOutput(item.preview).slice(0, 400) : item.preview.split('\n')[0]}`)),
       approvals: { requestApproval: async (request) => {
-        this.setStatus('waiting-review');
-        const presentation = approvalPresentation(request);
-        const view: ApprovalView = {
-          id: request.id, taskId: request.operation.scope.taskId, operationId: request.operation.id,
-          hostId: request.operation.scope.hostId, fingerprint: request.fingerprint, title: presentation.title,
-          explanation: presentation.explanation,
-          preview: this.preview(request.operation), account: request.operation.scope.runAs,
-          cwd: request.operation.scope.cwd, impact: request.impact,
-          targets: request.targets?.map((target) => redactOutput(target)),
-          recovery: presentation.recovery,
-          expiresAt: request.expiresAt
-        };
+        if (!maintenance) this.setStatus('waiting-review');
+        const view = approvalView(request);
         const allowed = await this.signals.requestApproval(view);
-        if (this.status === 'waiting-review') this.setStatus('running');
+        if (!maintenance && this.status === 'waiting-review') this.setStatus('running');
         return allowed;
       }, cancelApproval: (id) => this.signals.cancelApproval(id) },
-      executor: this.executor, audit, lease: {
+      executor: maintenance ? { execute: (operation, fingerprint, signal, options) => {
+        if (operation.kind !== 'runtime' || operation.runtime.action !== 'cleanup') throw new Error('Maintenance gate only authorizes fixed runtime cleanup');
+        return this.executor.execute(operation, fingerprint, signal, options);
+      } } : this.executor, audit, lease: {
         currentGeneration: (id) => this.terminal.currentGeneration(id),
-        isAgentOwner: (id) => !this.remoteBlocked && ['running', 'waiting-review'].includes(this.status)
+        isAgentOwner: (id) => (maintenance || !this.remoteBlocked && ['running', 'waiting-review'].includes(this.status))
           && this.terminal.isAgentOwner(id)
       },
       settings: (hostId) => ({ mode: this.task.reviewModesByHost?.[hostId]
@@ -564,15 +553,15 @@ export class TaskRunner {
   }
 
   private updateOperation(operation: ProposedOperation, status: OperationView['status'], source?: OperationView['verificationSource']): void {
-    this.verification.record(this.task.id, operation.id);
+    if (operation.kind !== 'runtime') this.verification.record(this.task.id, operation.id);
     const view: OperationView = {
-      verificationSource: source,
+      verificationSource: source, fileTransactionId: 'filePlan' in operation ? operation.filePlan?.transactionId : undefined,
       outputExpectation: operation.kind === 'command' ? operation.outputExpectation : undefined,
       serviceUnit: operation.kind === 'command' ? operation.serviceUnit : undefined,
       commandSource: operation.kind === 'command' && redactOutput(operation.scope.cwd) === operation.scope.cwd
         ? { version: 1, cwd: operation.scope.cwd } : undefined,
       intentKey: operationIntentKey(operation), id: operation.id, taskId: this.task.id, hostId: operation.scope.hostId, kind: operation.kind,
-      preview: this.preview(operation), status, runAs: operation.scope.runAs, loginAs: operation.scope.loginAs, logRef: operation.scope.terminalId,
+      preview: operationPreview(operation), status, runAs: operation.scope.runAs, loginAs: operation.scope.loginAs, logRef: operation.scope.terminalId,
       model: { provider: this.profile.provider, modelId: this.profile.modelId }, createdAt: Date.now()
     };
     this.replayProtected.add(operation.id);
@@ -583,25 +572,19 @@ export class TaskRunner {
   private updateDecision(id: string, decision: SafetyDecision): void {
     const view = this.operations.get(id);
     if (!view) return;
-    view.status = decision.verdict === 'allow' ? 'running' : 'denied';
-    view.reason = decision.reason;
-    view.ruleId = decision.ruleId;
-    view.manualReviewAvailable = decision.ruleId === 'ai-review-deny' && this.consecutiveAiDenials + 1 < 3;
+    applyOperationDecision(view, decision, this.consecutiveAiDenials);
     this.signals.event({ type: 'operation', value: view });
+  }
+
+  recordFileRecovery(operation: OperationView): void {
+    if (operation.taskId !== this.task.id || operation.fileRecovery?.evidence !== 'receipt-confirmed') return;
+    this.operations.set(operation.id, structuredClone(operation)); this.publishExecution();
   }
 
   recordRemoteResult(result: OperationResult): void {
     const operation = this.operations.get(result.operationId);
     if (!operation) return;
-    operation.status = result.status === 'succeeded' ? 'succeeded' : result.status === 'failed' ? 'failed' : 'unknown';
-    operation.exitCode = result.exitCode;
-    operation.exitObserved = ['succeeded', 'failed'].includes(result.status) && Number.isInteger(result.exitCode);
-    operation.completedAt = operation.exitObserved ? operation.completedAt ?? Date.now() : undefined;
-    operation.authentication = result.authentication; operation.authenticationAttempts = result.authenticationAttempts;
-    operation.failureKind = result.failureKind; operation.effects = result.effects; operation.privilege = result.privilege;
-    operation.outputTail = redactOutput(result.stdoutTail);
-    operation.outputCapture = result.outputCapture;
-    operation.logRef = result.logRef;
+    applyOperationCompletion(operation, result);
     this.signals.event({ type: 'operation', value: operation });
     this.verification.pending(this.task.id, operation, this.operationViews());
     this.publishExecution();
@@ -789,8 +772,26 @@ export class TaskRunner {
     this.resumeReason = resumeReason;
     if (status === 'paused' || status === 'failed') this.journal.finalize(this.verification.id);
     this.publishExecution();
-    if (!this.isRunning()) { this.signals.clearCredentials?.(); this.privileged?.close(); }
+    if (!this.isRunning()) {
+      this.signals.clearCredentials?.(); this.privileged?.close();
+      void this.releaseRuntime();
+    }
     if (!this.isRunning()) for (const id of this.terminalByHost.values()) this.terminal.releaseIdle(id);
     this.signals.event({ type: 'task-status', taskId: this.task.id, status, summary, resumeReason, requestCount: this.requestCount });
+  }
+
+  private releaseRuntime(): Promise<void> {
+    if (!this.signals.cleanupRuntime) return Promise.resolve();
+    if (this.cleanupPromise) return this.cleanupPromise;
+    const knownIdle = !this.terminal.pendingOperations(this.task.id).length && !this.operationViews().some((operation) =>
+      ['proposed', 'approved', 'running', 'unknown'].includes(operation.status) && !operation.reconciledAt);
+    const work = this.signals.cleanupRuntime(this.createGate(true), knownIdle, (scope) => {
+      const host = this.hosts.find((item) => item.id === scope.hostId);
+      if (!host) throw new Error('Runtime cleanup host no longer authorized');
+      return { ...scope, policyRevision: host.policyRevision, conversationRevision: this.task.reviewRevision ?? 1,
+        reviewerRevision: this.profile.reviewer?.revision ?? 1, protectedPaths: [...host.protectedPaths],
+        protectedReadPaths: [...(host.protectedReadPaths ?? host.protectedPaths)], protectedWritePaths: [...(host.protectedWritePaths ?? host.protectedPaths)] };
+    }).catch(() => { this.signals.abandonRuntime?.(); }).finally(() => { if (this.cleanupPromise === work) this.cleanupPromise = undefined; });
+    this.cleanupPromise = work; return work;
   }
 }

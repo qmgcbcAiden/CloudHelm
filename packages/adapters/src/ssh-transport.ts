@@ -1,20 +1,13 @@
+import { cleanupNativeRuntime, installNativeRuntime, type InstalledNativeRuntime } from './native-runtime.js';
+import type { NativeArtifact, RuntimeOperationPlan } from '@cloudhelm/core';
 import { openIntegratedShell } from './shell-integration.js';
-import { redactOutput } from '@cloudhelm/core';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import path from 'node:path';
 import { Client, type ClientChannel, type ConnectConfig, type FileEntryWithStats, type SFTPWrapper } from 'ssh2';
 
 export class HostKeyError extends Error {
   constructor(readonly fingerprint: string, readonly expected?: string) {
     super(expected ? 'SSH host key changed' : 'SSH host key is not trusted yet');
-  }
-}
-
-/** A preflight failure is distinguishable from any attempted remote write. */
-export class RemoteFileError extends Error {
-  constructor(readonly effects: 'none' | 'possible', readonly permissionDenied: boolean, detail?: string) {
-    super(permissionDenied ? 'Remote filesystem permission denied' : redactOutput(detail ?? 'Remote file operation failed; verify if effects are possible'));
   }
 }
 
@@ -152,29 +145,47 @@ export class SshTransport {
     client.once('close', () => {
       if (this.connections.get(hostId) !== client) return;
       this.connections.delete(hostId);
+      this.forgetNativeHost(hostId);
       this.generations.set(hostId, (this.generations.get(hostId) ?? 0) + 1);
       this.onDisconnected(hostId);
     });
   }
 
   isConnected(hostId: string): boolean { return this.connections.has(hostId); }
-  private readonly commandPreflights = new Map<string, { generation: number; promise: Promise<void> }>();
+  private readonly runtimes = new Map<string, InstalledNativeRuntime>();
 
-  private async checkCommandEnvironment(hostId: string): Promise<void> {
+  async nativeArchitecture(hostId: string): Promise<NativeArtifact['arch']> {
+    const result = await this.execFixed(hostId, 'uname -s; uname -m');
+    const lines = result.output.trim().split(/\r?\n/u);
+    if (result.exitCode !== 0 || lines.length !== 2 || lines[0] !== 'Linux') throw new Error('Agent operations require Linux; business operation not started');
+    if (lines[1] === 'x86_64') return 'amd64';
+    if (lines[1] === 'aarch64' || lines[1] === 'arm64') return 'arm64';
+    throw new Error('Unsupported remote architecture; business operation not started');
+  }
+
+  nativeInfo(hostId: string, sessionId: string, terminalGeneration: number): InstalledNativeRuntime | undefined {
+    const installed = this.runtimes.get(JSON.stringify([hostId, sessionId, terminalGeneration]));
+    return installed?.generation === this.connectionGeneration(hostId) ? installed : undefined;
+  }
+
+  async installNative(hostId: string, plan: RuntimeOperationPlan, bytes: Buffer, assertAuthorized: () => void, signal?: AbortSignal, terminalGeneration = 1): Promise<void> {
     const generation = this.connectionGeneration(hostId);
-    const previous = this.commandPreflights.get(hostId);
-    if (previous?.generation === generation) return previous.promise;
-    const promise = this.execFixed(hostId, `python3 -I -c 'import pty, fcntl, termios, socket, subprocess, shutil'`).then((result) => {
-      if (result.exitCode !== 0) {
-        const detail = redactOutput(result.output).trim().slice(-300);
-        throw new Error(`远端环境检查未通过（exit ${result.exitCode}）：需要可用的 POSIX Python 3${detail ? `；远端输出：${detail}` : ''}`);
-      }
-    }).catch((error: unknown) => {
-      if (this.commandPreflights.get(hostId)?.promise === promise) this.commandPreflights.delete(hostId);
-      throw error;
-    });
-    this.commandPreflights.set(hostId, { generation, promise });
-    return promise;
+    const current = () => { assertAuthorized(); if (generation !== this.connectionGeneration(hostId)) throw new Error('SSH connection changed'); };
+    await installNativeRuntime(plan, bytes, (command) => this.openPipe(hostId, command), current, signal);
+    current();
+    this.runtimes.set(JSON.stringify([hostId, plan.sessionId, terminalGeneration]), { hostId, terminalGeneration,
+      artifact: plan.artifact, executable: plan.executable, directory: plan.directory, sessionId: plan.sessionId, generation });
+  }
+
+  async cleanupNative(hostId: string, plan: RuntimeOperationPlan, terminalGeneration: number, assertAuthorized: () => void): Promise<void> {
+    const installed = this.nativeInfo(hostId, plan.sessionId, terminalGeneration);
+    if (!installed || installed.directory !== plan.directory || installed.artifact.sha256 !== plan.artifact.sha256)
+      throw new Error('Runtime cleanup ownership changed');
+    await cleanupNativeRuntime(plan, (command) => this.execFixed(hostId, command), assertAuthorized);
+    this.runtimes.delete(JSON.stringify([hostId, plan.sessionId, terminalGeneration]));
+  }
+  private forgetNativeHost(hostId: string): void {
+    for (const [key, value] of this.runtimes) if (value.hostId === hostId) this.runtimes.delete(key);
   }
 
   connectionGeneration(hostId: string): number { return this.generations.get(hostId) ?? 0; }
@@ -205,33 +216,17 @@ export class SshTransport {
     });
   }
 
-  /** Installs only the fixed process transport, never model-authored scripts or secrets. */
-  async prepareCommandProgram(hostId: string, source: string, assertAuthorized: () => void): Promise<string> {
+  /** Lookup only: installation must already have its own SafetyGate authorization. */
+  async prepareCommandProgram(hostId: string, _source: string, assertAuthorized: () => void,
+    binding?: { sessionId: string; generation: number }): Promise<string> {
     assertAuthorized();
-    await this.checkCommandEnvironment(hostId);
-    assertAuthorized();
-    const result = await this.execFixed(hostId, 'command -v python3 && mktemp -d /tmp/cloudhelm-run.XXXXXXXX');
-    const lines = result.output.trim().split(/\r?\n/u);
-    const directory = lines[1];
-    if (result.exitCode !== 0 || lines.length !== 2 || !lines[0]?.startsWith('/')
-      || !directory || !/^\/tmp\/cloudhelm-run\.[A-Za-z0-9]+$/u.test(directory)) {
-      const detail = redactOutput(result.output).trim().slice(-300);
-      throw new Error(`远端命令通道准备失败（exit ${result.exitCode}）：需要可解析的 python3 且 /tmp 可写${detail ? `；远端输出：${detail}` : ''}`);
-    }
-    const script = `${directory}/process.py`;
-    try {
-      await this.withSftp(hostId, (sftp) => this.writeSftpFile(sftp, script, Buffer.from(source), 0o700, assertAuthorized));
-      return script;
-    } catch (error) {
-      await this.removeCommandProgram(hostId, script).catch(() => {});
-      throw error;
-    }
+    const runtime = binding ? this.nativeInfo(hostId, binding.sessionId, binding.generation) : undefined;
+    if (!runtime) throw new Error('No authorized native runtime is installed for this connection');
+    return runtime.executable;
   }
 
-  async removeCommandProgram(hostId: string, script: string): Promise<void> {
-    if (!/^\/tmp\/cloudhelm-run\.[A-Za-z0-9]+\/process\.py$/u.test(script)) throw new Error('Invalid command transport path');
-    await this.execFixed(hostId, `rm -f -- ${script}; rmdir -- ${path.posix.dirname(script)}`);
-  }
+  /** Runtime ownership and cleanup belong to the task resource journal, not a terminal. */
+  async removeCommandProgram(_hostId: string, _executable: string): Promise<void> {}
 
   async integratedShell(hostId: string, cols = 100, rows = 30) {
     const client = this.connections.get(hostId);
@@ -256,74 +251,6 @@ export class SshTransport {
     });
   }
 
-  /** Read a small regular script for policy analysis; never follow symlinks or expose it to the model. */
-  async inspectScript(hostId: string, absolutePath: string): Promise<{ source: string; sha256: string }> {
-    return this.withSftp(hostId, async (sftp) => {
-      await this.checkSafeParent(sftp, absolutePath);
-      const stat = await this.lstatOptional(sftp, absolutePath);
-      if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size > 65_536) throw new Error('Script is not a small regular file');
-      const bytes = await this.readSftpFile(sftp, absolutePath);
-      if (bytes.length > 65_536 || bytes.includes(0)) throw new Error('Script content is not inspectable text');
-      const source = bytes.toString('utf8');
-      if (!Buffer.from(source, 'utf8').equals(bytes)) throw new Error('Script encoding is not valid UTF-8');
-      return { source, sha256: createHash('sha256').update(bytes).digest('hex') };
-    });
-  }
-
-  /** Writes through a private temporary file and retains a private backup of an overwritten file. */
-  async writeFile(hostId: string, absolutePath: string, content: Buffer, assertAuthorized: () => void = () => {}): Promise<string | undefined> {
-    if (content.length > 1_048_576) throw new Error('Structured writes are limited to 1 MiB');
-    let effects: 'none' | 'possible' = 'none';
-    try { return await this.withSftp(hostId, async (sftp) => {
-      await this.checkSafeParent(sftp, absolutePath);
-      const existing = await this.lstatOptional(sftp, absolutePath);
-      if (existing?.isSymbolicLink() || existing?.isDirectory()) throw new Error('Target must be a regular file, not a symlink or directory');
-      if (existing && existing.size > 1_048_576) throw new Error('Existing file is too large for a managed backup');
-      const backup = existing ? `${absolutePath}.cloudhelm-backup-${randomUUID()}` : undefined;
-      if (backup) {
-        const original = await this.readSftpFile(sftp, absolutePath);
-        effects = 'possible';
-        await this.writeSftpFile(sftp, backup, original, 0o600, assertAuthorized);
-      }
-      const temporary = `${absolutePath}.cloudhelm-new-${randomUUID()}`;
-      try {
-        effects = 'possible';
-        await this.writeSftpFile(sftp, temporary, content, existing ? existing.mode & 0o777 : 0o600, assertAuthorized);
-        await new Promise<void>((resolve, reject) => {
-          assertAuthorized();
-          sftp.ext_openssh_rename(temporary, absolutePath, (error) => error ? reject(error) : resolve());
-        });
-      } catch (error) {
-        await this.unlinkOptional(sftp, temporary, assertAuthorized).catch(() => undefined);
-        throw error;
-      }
-      return backup;
-    }); } catch (error) {
-      throw new RemoteFileError(effects, !!error && typeof error === 'object' && 'code' in error && (error.code === 3 || error.code === 'EACCES' || error.code === 'EPERM'), error instanceof Error ? error.message : undefined);
-    }
-  }
-
-  /** Deletes regular files only, preserving a separate recovery copy. */
-  async deleteFile(hostId: string, absolutePath: string, assertAuthorized: () => void = () => {}): Promise<string> {
-    let effects: 'none' | 'possible' = 'none';
-    try { return await this.withSftp(hostId, async (sftp) => {
-      await this.checkSafeParent(sftp, absolutePath);
-      const existing = await this.lstatOptional(sftp, absolutePath);
-      if (!existing || existing.isDirectory() || existing.isSymbolicLink()) throw new Error('Only an existing regular file can be deleted');
-      if (existing.size > 1_048_576) throw new Error('File is too large for a managed backup');
-      const backup = `${absolutePath}.cloudhelm-backup-${randomUUID()}`;
-      effects = 'possible';
-      await this.writeSftpFile(sftp, backup, await this.readSftpFile(sftp, absolutePath), 0o600, assertAuthorized);
-      await new Promise<void>((resolve, reject) => {
-        assertAuthorized();
-        sftp.unlink(absolutePath, (error) => error ? reject(error) : resolve());
-      });
-      return backup;
-    }); } catch (error) {
-      throw new RemoteFileError(effects, !!error && typeof error === 'object' && 'code' in error && (error.code === 3 || error.code === 'EACCES' || error.code === 'EPERM'), error instanceof Error ? error.message : undefined);
-    }
-  }
-
   private async withSftp<T>(hostId: string, action: (sftp: SFTPWrapper) => Promise<T>): Promise<T> {
     const client = this.connections.get(hostId);
     if (!client) throw new Error('Host is not connected');
@@ -334,49 +261,11 @@ export class SshTransport {
     finally { sftp.end(); }
   }
 
-  private async checkSafeParent(sftp: SFTPWrapper, absolutePath: string): Promise<void> {
-    if (!path.posix.isAbsolute(absolutePath) || absolutePath === '/') throw new Error('An absolute file path is required');
-    const parts = path.posix.dirname(absolutePath).split('/').filter(Boolean);
-    let current = '';
-    for (const part of parts) {
-      current += `/${part}`;
-      const stat = await this.lstatOptional(sftp, current);
-      if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new Error(`Unsafe or missing parent directory: ${current}`);
-    }
-  }
-
-  private async lstatOptional(sftp: SFTPWrapper, remotePath: string): Promise<import('ssh2').Stats | undefined> {
-    return new Promise((resolve, reject) => {
-      sftp.lstat(remotePath, (error, stat) => {
-        if (!error) resolve(stat);
-        else if ('code' in error && error.code === 2) resolve(undefined);
-        else reject(error);
-      });
-    });
-  }
-
-  private async readSftpFile(sftp: SFTPWrapper, remotePath: string): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      sftp.readFile(remotePath, (error, data) => error ? reject(error) : resolve(data));
-    });
-  }
-
-  private async writeSftpFile(sftp: SFTPWrapper, remotePath: string, content: Buffer, mode = 0o600, assertAuthorized: () => void = () => {}): Promise<void> {
-    assertAuthorized();
-    return new Promise((resolve, reject) => {
-      sftp.writeFile(remotePath, content, { mode, flag: 'wx' }, (error) => error ? reject(error) : resolve());
-    });
-  }
-
-  private async unlinkOptional(sftp: SFTPWrapper, remotePath: string, assertAuthorized: () => void = () => {}): Promise<void> {
-    assertAuthorized();
-    await new Promise<void>((resolve) => { sftp.unlink(remotePath, () => resolve()); });
-  }
-
   disconnect(hostId: string): void {
     const client = this.connections.get(hostId);
     if (!client) return;
     this.connections.delete(hostId);
+    this.forgetNativeHost(hostId);
     this.generations.set(hostId, (this.generations.get(hostId) ?? 0) + 1);
     client.end();
     this.onDisconnected(hostId);

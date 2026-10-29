@@ -1,8 +1,16 @@
+import { fileReadProtectionReason } from '@cloudhelm/core';
+import { recoverManagedFile } from './file-recovery-runtime.js';
+import { FileTransactionClient } from './file-transaction-client.js';
+import { RuntimeResourceClient } from './runtime-resource-client.js';
+import { NativeRuntimePreparation } from './native-runtime-preparation.js';
+import { NativeFileClient, quoteRemote } from '@cloudhelm/adapters';
+import { prepareFileOperation, type ManagedFileOperation } from '@cloudhelm/application';
+import { LocalFileAccess } from './local-file-access.js';
 import { MessagePreparations } from './message-preparations.js';
 import { ShellMarkerParser } from '@cloudhelm/adapters';
 import { StringDecoder } from 'node:string_decoder';
 import { PrivilegedRuntime } from './privileged-runtime.js';
-import { safeDiagnostic } from '@cloudhelm/core';
+import { isPrivateInputAnswer, privateAnswerValue, safeDiagnostic, type PrivateInputAnswer } from '@cloudhelm/core';
 import { eventDiagnostic, reservationDiagnostic } from './diagnostic-events.js';
 import { HostSerialExecutor, PermissionAwareExecutor, InteractionCoordinator, TerminalManager } from '@cloudhelm/application';
 import { BashAnalyzer, HostKeyError, SshCommandTerminal, SshTransport, type SshHost, type SshLoginPrompt } from '@cloudhelm/adapters';
@@ -21,6 +29,9 @@ import { RequestBudgetClient } from './request-budget-client.js';
 
 export class WorkerServer {
   private readonly budget: RequestBudgetClient;
+  private readonly fileJournal: FileTransactionClient;
+  private readonly resourceJournal: RuntimeResourceClient;
+  private readonly native: NativeRuntimePreparation;
   private readonly deliveredMessages = new Set<string>();
   private readonly preparations: MessagePreparations;
   private readonly logRequests = new Map<string, { resolve(value: LogPage): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
@@ -28,8 +39,8 @@ export class WorkerServer {
     for (const runner of this.tasks.values()) if (runner.task.hostIds.includes(hostId)) {
       this.preparations.cancelTask(runner.task.id); runner.pause();
     }
-    this.terminal.closeHost(hostId);
-    this.post({ event: { type: 'host-status', hostId, status: 'disconnected' } });
+    try { this.terminal.closeHost(hostId); }
+    finally { this.post({ event: { type: 'host-status', hostId, status: 'disconnected' } }); }
   });
   private readonly terminal: TerminalManager;
   private readonly executor: HostSerialExecutor;
@@ -42,6 +53,8 @@ export class WorkerServer {
   private readonly pendingInputs = new Map<string, { connectionId: string; expiresAt: number; resolve(answer: string | null): void; timeout: ReturnType<typeof setTimeout> }>();
 
   constructor(private readonly send: (message: RuntimeMessage) => void) {
+    this.fileJournal = new FileTransactionClient((message) => this.post(message));
+    this.resourceJournal = new RuntimeResourceClient((message) => this.post(message));
     this.budget = new RequestBudgetClient((message) => this.post(message), 30_000, (command, value) => {
       const diagnostic = reservationDiagnostic(command, value); if (diagnostic) this.send({ diagnostic });
     });
@@ -64,7 +77,7 @@ export class WorkerServer {
       opened: (request) => this.post({ event: { type: 'input-open', value: {
         id: request.id, taskId: request.taskId, operationId: request.operationId, hostId: request.hostId,
         title: request.prompt, explanation: `${request.reason} 接收方：${request.recipient}`, kind: request.kind,
-        choices: request.choices, expiresAt: request.expiresAt
+        choices: request.choices, expiresAt: request.expiresAt, allowPasswordCache: request.allowPasswordCache
       } } }),
       closed: (id) => this.post({ event: { type: 'input-close', id } })
     });
@@ -72,11 +85,49 @@ export class WorkerServer {
       (taskId, hostId) => this.post({ event: { type: 'task-message', taskId, role: 'system',
         text: `已审核的安装操作在主机 ${hostId} 上需要普通继续确认，APT 报告 0 项删除，已自动回答 y。`, createdAt: Date.now() } }),
       (taskId, hostId, operationId) => this.post({ diagnostic: { event: 'authentication.reused', taskId, hostId, operationId } }));
-    this.privileged = new PrivilegedRuntime({ terminal: this.terminal, ssh: this.ssh,
-      ordinary: new FileOperationExecutor(this.terminal, this.ssh, this.commands),
+    this.native = new NativeRuntimePreparation(this.terminal, (record) => this.resourceJournal.commit(record));
+    this.privileged = new PrivilegedRuntime({ runtime: this.native, commands: this.commands, files: (op) => this.files(op), terminal: this.terminal, ssh: this.ssh,
+      ordinary: new FileOperationExecutor(this.terminal, this.ssh, this.commands, (op) => this.files(op)),
       jump: (host) => host.jumpHostId ? this.hosts.get(host.jumpHostId) : undefined,
       input: (request, signal) => this.requestPrivateInput(request, signal) });
-    this.executor = new HostSerialExecutor(new PermissionAwareExecutor(this.privileged, new BashAnalyzer()));
+    this.executor = new HostSerialExecutor(new PermissionAwareExecutor({ execute: (operation, fingerprint, signal, options) =>
+      (operation.kind === 'runtime' ? this.native : this.privileged).execute(operation, fingerprint, signal, options) }, new BashAnalyzer()));
+  }
+
+  resolveFileJournal(value: unknown): void { this.fileJournal.resolve(value); }
+  resolveRuntimeResource(value: import('@cloudhelm/contracts').RuntimeResourceResult['runtimeResourceResult']): void { this.resourceJournal.receive(value); }
+
+  private async inspectScript(operation: import('@cloudhelm/core').ProposedOperation, scriptPath: string) {
+    const target = path.posix.resolve(operation.scope.cwd, scriptPath);
+    const read: ManagedFileOperation = { id: operation.id, kind: 'write-file', path: target, content: '', scope: operation.scope };
+    const result = await this.files(read).remote.inspect(read, target);
+    if (!result.snapshot.exists || !result.snapshot.sha256) throw new Error('Script snapshot unavailable');
+    return { source: Buffer.from(result.content).toString('utf8'), sha256: result.snapshot.sha256 };
+  }
+
+  private files(operation: ManagedFileOperation) {
+    const ssh = this.privileged.fileTransport(operation);
+    const info = ssh.nativeInfo(operation.scope.hostId, operation.scope.sessionId ?? operation.scope.terminalId, operation.scope.terminalGeneration);
+    if (!info) throw new Error('Native file runtime unavailable');
+    const generation = ssh.connectionGeneration(operation.scope.hostId);
+    const current = () => {
+      const host = this.hosts.get(operation.scope.hostId);
+      if (!host || host.policyRevision !== operation.scope.policyRevision) throw new Error('File policy changed');
+      const target = operation.kind === 'upload' ? operation.remotePath : operation.path;
+      const reason = fileReadProtectionReason(target, { ...operation.scope, protectedReadPaths: host.protectedReadPaths ?? host.protectedPaths }, operation.filePlan?.transactionId);
+      if (reason) throw new Error(reason);
+      if (generation !== ssh.connectionGeneration(operation.scope.hostId) || !this.terminal.isAgentOwner(operation.scope.terminalId)
+        || this.terminal.currentGeneration(operation.scope.terminalId) !== operation.scope.terminalGeneration) throw new Error('File session expired');
+    };
+    const remote = new NativeFileClient(info.artifact, async (op, signal, assertAuthorized) => {
+      current(); signal?.throwIfAborted(); assertAuthorized?.();
+      const channel = await ssh.openPipe(op.scope.hostId, `${quoteRemote(info.executable)} --files`);
+      try { current(); signal?.throwIfAborted(); assertAuthorized?.(); }
+      catch (error) { channel.destroy(); throw error; }
+      return { channel, assertCurrent: current, binding: { version: 1 as const, sessionId: op.scope.sessionId ?? op.scope.terminalId,
+        operationId: op.id, generation: op.scope.terminalGeneration } };
+    });
+    return { remote, journal: this.fileJournal };
   }
 
   private post(message: RuntimeMessage): void {
@@ -123,6 +174,22 @@ export class WorkerServer {
         }
         return;
       }
+      case 'recover-file-transaction': return recoverManagedFile(call.record, {
+        terminal: this.terminal, ssh: this.ssh, native: this.native, privileged: this.privileged,
+        executor: this.executor, journal: this.fileJournal, files: (op) => this.files(op), host: (id) => this.hosts.get(id),
+        approval: (view) => this.requestApproval(view), cancelApproval: (id) => this.cancelApproval(id),
+        operation: (value) => this.post({ event: { type: 'operation', value } })
+      });
+      case 'commit-file-recovery': {
+        const op = call.operation;
+        const record = op.fileTransactionId ? await this.fileJournal.get(op.fileTransactionId) : undefined;
+        if (!record || record.stage !== 'confirmed' || !record.receipt || record.operationId !== op.id
+          || record.taskId !== op.taskId || record.hostId !== op.hostId || op.fileRecovery?.evidence !== 'receipt-confirmed'
+          || !op.reconciledAt || op.fileRecovery.transactionId !== record.id) throw new Error('文件核验凭据未持久化');
+        if (!this.executor.reconcile(op.hostId, op.id)) throw new Error('原操作仍在运行，未解除写锁');
+        for (const runner of this.tasks.values()) runner.recordFileRecovery(op);
+        return;
+      }
       case 'has-task': return this.tasks.has(call.taskId);
       case 'set-review-key':
         for (const runner of this.tasks.values()) runner.setReviewKey(call.jevKey);
@@ -151,8 +218,8 @@ export class WorkerServer {
       case 'stop-operation': return this.tasks.get(call.taskId)?.stopOperation();
       case 'disconnect':
         for (const runner of this.tasks.values()) if (runner.task.hostIds.includes(call.hostId)) runner.pause();
-        this.terminal.closeHost(call.hostId);
-        this.ssh.disconnect(call.hostId);
+        try { this.terminal.closeHost(call.hostId); }
+        finally { this.ssh.disconnect(call.hostId); }
         return;
       case 'connect': return this.connect(call.host, call.jump);
       case 'test-host': return testHostConnection(call.host, call.jump);
@@ -160,8 +227,13 @@ export class WorkerServer {
         for (const [id, pending] of this.pendingApprovals) {
           if (pending.hostId === call.hostId) this.cancelApproval(id);
         }
+        this.commands.clearHost(call.hostId);
         for (const runner of this.tasks.values()) runner.updateHostSafety(call.hostId, call.mode,
-          call.protectedReadPaths, call.protectedWritePaths, call.revision);
+          call.protectedReadPaths, call.protectedWritePaths, call.revision, call.sudoCachePolicy);
+        if (this.hosts.has(call.hostId)) Object.assign(this.hosts.get(call.hostId)!, {
+          defaultMode: call.mode, policyRevision: call.revision, protectedReadPaths: call.protectedReadPaths,
+          protectedWritePaths: call.protectedWritePaths, ...(call.sudoCachePolicy ? { sudoCachePolicy: call.sudoCachePolicy } : {})
+        });
         return;
       case 'update-conversation-review-mode': {
         for (const [id, pending] of this.pendingApprovals) {
@@ -212,19 +284,27 @@ export class WorkerServer {
               return this.budget.request(command, signal);
             },
             clearCredentials: () => this.commands.clearTask(call.task.id),
+            cleanupRuntime: async (gate, knownIdle, refresh) => {
+              if (!knownIdle) await this.native.markUnknown(undefined, call.task.id);
+              await this.native.cleanupTask(call.task.id, gate, refresh);
+            },
+            abandonRuntime: () => { void this.native.markUnknown(undefined, call.task.id).catch(() => {}); },
             diagnostic: (diagnostic) => this.send({ diagnostic: safeDiagnostic(diagnostic) }),
             event: (event) => this.post({ event } as RuntimeMessage),
+            filePreview: (value) => this.send({ filePreview: value }),
             requestApproval: (view) => this.requestApproval(view),
             cancelApproval: (id) => this.cancelApproval(id)
           }, (operationId, cursor) => this.readLog(call.task.id, operationId, cursor), this.privileged.forTask(call.task.id),
           { id: call.task.session.id, directory: call.sessionDirectory, restore: !!call.restored }, {
-            inspect: (operation, scriptPath) => this.ssh.inspectScript(operation.scope.hostId,
-              path.posix.resolve(operation.scope.cwd, scriptPath)),
-            verify: async (operation, scriptPath, sha256) => {
-              const inspected = await this.ssh.inspectScript(operation.scope.hostId,
-                path.posix.resolve(operation.scope.cwd, scriptPath));
-              return inspected.sha256 === sha256;
-            }
+            inspect: (operation, scriptPath) => this.inspectScript(operation, scriptPath),
+            verify: async (operation, scriptPath, sha256) => (await this.inspectScript(operation, scriptPath)).sha256 === sha256
+          }, async (operation, gate, signal) => {
+            const host = this.hosts.get(operation.scope.hostId);
+            await this.privileged.prepareNative(operation, gate, host?.runtimeDirectory, signal);
+            if (operation.kind === 'command' || operation.kind === 'runtime') return { operation };
+            const remote = this.files(operation).remote;
+            return prepareFileOperation(operation, remote, async (upload, abort) =>
+              (await new LocalFileAccess(call.task.localScopes ?? []).read(upload.localPath, abort)).data, signal);
           });
         this.tasks.set(call.task.id, runner);
         const start = runner.start(call.restored, call.thinkingLevel, call.document, call.initialMessage, call.intent);
@@ -363,13 +443,14 @@ export class WorkerServer {
     });
   }
 
-  private answerInput(id: string, answer: string | null): void {
+  private answerInput(id: string, answer: PrivateInputAnswer): void {
+    if (!isPrivateInputAnswer(answer)) throw new Error('Invalid private input response');
     const pending = this.pendingInputs.get(id);
     if (!pending) throw new Error('Input request expired');
     this.pendingInputs.delete(id);
     clearTimeout(pending.timeout);
     this.post({ event: { type: 'input-close', id } });
-    pending.resolve(Date.now() < pending.expiresAt ? answer : null);
+    pending.resolve(Date.now() < pending.expiresAt ? privateAnswerValue(answer) : null);
   }
 
   private async openTerminal(hostId: string, taskId?: string): Promise<string> {
@@ -382,8 +463,9 @@ export class WorkerServer {
     const decoder = new StringDecoder('utf8');
     const parser = new ShellMarkerParser(nonce, (text) => output(text), (event) => command(event));
     const raw: RawTerminal = {
-      write: (data) => channel.write(data),
-      resize: (cols, rows) => channel.setWindow(rows, cols, 0, 0),
+      human: { open() {}, write: (data) => { channel.write(data); },
+        resize: (cols, rows) => channel.setWindow(rows, cols, 0, 0),
+        respondToTerminalQuery: (data) => { channel.write(data); return true; } },
       close: () => channel.end(),
       onCommand: (listener) => { command = listener; },
       onData: (listener) => { output = listener; channel.on('data', (data: Buffer) => parser.push(decoder.write(data))); },

@@ -12,6 +12,59 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  adapters:
+    name: TypeScript SSH deployment and native protocol
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v5.0.0
+        with:
+          version: 11.9.0
+          run_install: false
+      - name: Install locked dependencies and build both bundled ELF artifacts
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build:native
+      - name: Start empty isolated SSH fixture on loopback
+        run: |
+          set -euo pipefail
+          mkdir -p .cache/adapter-fixture
+          docker build -f Tests/native/fixture/Dockerfile.adapter -t cloudhelm-adapter-fixture Tests/native/fixture
+          docker run -d --name cloudhelm-adapter-fixture --cap-add SYS_PTRACE -p 127.0.0.1:22388:22 cloudhelm-adapter-fixture
+          for attempt in $(seq 1 40); do
+            if docker exec cloudhelm-adapter-fixture test -f /fixture-ready; then break; fi
+            sleep 0.25
+          done
+          docker exec cloudhelm-adapter-fixture test -f /fixture-ready
+          docker cp cloudhelm-adapter-fixture:/home/cloudhelm/.ssh/id_ed25519 .cache/adapter-fixture/id_ed25519
+          chmod 600 .cache/adapter-fixture/id_ed25519
+      - name: Real TS stream installation, staged file commit, sudo and su
+        env:
+          CLOUDHELM_ISOLATED_FIXTURE: '1'
+          CLOUDHELM_TEST_SSH_PORT: '22388'
+          CLOUDHELM_TEST_SSH_USER: cloudhelm
+        run: |
+          set -euo pipefail
+          export CLOUDHELM_TEST_SSH_KEY="$PWD/.cache/adapter-fixture/id_ed25519"
+          test -s "$CLOUDHELM_TEST_SSH_KEY"
+          pnpm exec vitest run Tests/adapters/ssh-transport.integration.test.ts Tests/adapters/native-command.integration.test.ts --reporter=verbose 2>&1 | tee .cache/adapter-fixture/results.log
+          if grep -Eq '[1-9][0-9]* skipped' .cache/adapter-fixture/results.log; then
+            echo 'Adapter integration must execute, never skip'; exit 1
+          fi
+      - name: Stop the disposable fixture
+        if: always()
+        run: docker rm -f cloudhelm-adapter-fixture || true
+
   native:
     name: Real SSH, sudo and su · ${{ matrix.arch }} · ${{ matrix.libc }}
     timeout-minutes: 20

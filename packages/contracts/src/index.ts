@@ -1,8 +1,10 @@
 import { Type, type Static } from 'typebox';
 import type { VerificationReport, VerificationState } from './verification-report.js';
+import type { PrivateInputAnswer, SudoCachePolicy } from './private-input.js';
 export * from './verification-report.js';
 export * from './request-budget.js';
 export * from './request-budget-runtime.js';
+export * from './private-input.js';
 
 export const HostDraftSchema = Type.Object({
   label: Type.String({ minLength: 1, maxLength: 80 }),
@@ -11,7 +13,8 @@ export const HostDraftSchema = Type.Object({
   username: Type.String({ minLength: 1, maxLength: 128 }),
   auth: Type.Union([Type.Literal('agent'), Type.Literal('private-key'), Type.Literal('password')]),
   privateKeyPath: Type.Optional(Type.String()),
-  jumpHostId: Type.Optional(Type.String())
+  jumpHostId: Type.Optional(Type.String()),
+  runtimeDirectory: Type.Optional(Type.String({ minLength: 1, maxLength: 2048, pattern: '^/[^\\u0000-\\u001f]*$' }))
 });
 
 export type HostDraft = Static<typeof HostDraftSchema>;
@@ -114,6 +117,7 @@ export interface HostView extends HostDraft {
   protectedWritePaths?: string[];
   defaultMode: ReviewMode;
   policyRevision: number;
+  sudoCachePolicy?: SudoCachePolicy;
 }
 
 export const TaskIntentStateSchema = Type.Object({
@@ -160,6 +164,8 @@ export interface TaskView {
 
 export interface OperationView {
   /** Capability verified from the full operation before execution, not from its display preview. */
+  fileTransactionId?: string;
+  fileRecovery?: import('./file-transactions.js').FileRecoveryView;
   readOnly?: boolean;
   ruleId?: string;
   manualReviewAvailable?: boolean;
@@ -177,7 +183,7 @@ export interface OperationView {
   authentication?: 'succeeded' | 'required' | 'failed';
   authenticationAttempts?: number;
   privilege?: import('./privilege.js').PrivilegeFeedbackView;
-  failureKind?: 'authentication-required' | 'permission-denied' | 'authentication-failed' | 'unsupported' | 'user-action-required' | 'unresolved-prior-operation' | 'unknown';
+  failureKind?: 'authentication-required' | 'permission-denied' | 'authentication-failed' | 'unsupported' | 'user-action-required' | 'unresolved-prior-operation' | 'conflict' | 'unknown';
   effects?: 'none' | 'possible';
   loginAs?: string;
   runAs?: string;
@@ -185,7 +191,7 @@ export interface OperationView {
   id: string;
   taskId: string;
   hostId: string;
-  kind: 'command' | 'write-file' | 'upload' | 'delete-path';
+  kind: 'command' | 'write-file' | 'upload' | 'delete-path' | 'runtime';
   preview: string;
   status: 'proposed' | 'approved' | 'running' | 'succeeded' | 'failed' | 'denied' | 'unknown';
   reason?: string;
@@ -198,7 +204,7 @@ export interface OperationView {
 }
 
 /** Outcome fields the write-lock and recovery rules reason about. */
-export type OperationOutcomeState = Pick<OperationView, 'readOnly' | 'status' | 'effects' | 'reconciledAt'>;
+export type OperationOutcomeState = Pick<OperationView, 'readOnly' | 'status' | 'effects' | 'reconciledAt' | 'fileRecovery'>;
 
 /**
  * True while a non-read-only operation's recorded remote outcome still gates
@@ -206,6 +212,7 @@ export type OperationOutcomeState = Pick<OperationView, 'readOnly' | 'status' | 
  * they are never resolved by guessing, only by their real completion.
  */
 export function operationNeedsVerification(operation: OperationOutcomeState): boolean {
+  if (operation.fileRecovery?.lockState === 'pending') return true;
   if (operation.readOnly || operation.reconciledAt) return false;
   return ['proposed', 'approved', 'running', 'unknown'].includes(operation.status)
     || (operation.status === 'failed' && operation.effects !== 'none');
@@ -234,7 +241,9 @@ export function retainOperationResolution(previous: OperationView | undefined, i
   if (incoming.reconciledAt && (incoming.reconciledAt !== previous.reconciledAt
     || incoming.reconciliation?.kind !== previous.reconciliation?.kind
     || incoming.reconciliation?.outcome !== previous.reconciliation?.outcome)) return previous;
-  return { ...incoming, reconciledAt: previous.reconciledAt, reconciliation: previous.reconciliation };
+  return { ...incoming, fileTransactionId: previous.fileTransactionId ?? incoming.fileTransactionId,
+    fileRecovery: previous.fileRecovery?.lockState === 'pending' && incoming.fileRecovery?.lockState === 'confirmed'
+      ? incoming.fileRecovery : previous.fileRecovery ?? incoming.fileRecovery, reconciledAt: previous.reconciledAt, reconciliation: previous.reconciliation };
 }
 
 export interface ApprovalView {
@@ -250,6 +259,7 @@ export interface ApprovalView {
   impact?: 'ordinary' | 'high' | 'unknown';
   targets?: string[];
   recovery?: string;
+  filePreviewOperationId?: string;
   preview: string;
   expiresAt: number;
 }
@@ -264,6 +274,7 @@ export interface InputRequestView {
   kind: 'confirmation' | 'text' | 'secret' | 'otp';
   choices?: string[];
   expiresAt: number;
+  allowPasswordCache?: boolean;
 }
 
 export interface ExecutionView {
@@ -274,6 +285,7 @@ export interface ExecutionView {
 }
 
 export interface AppSnapshot {
+  runtimeResources?: import('./runtime-resources.js').RuntimeResourceView[];
   reasoningProgress?: Record<string, ReasoningProgress>;
   execution?: Record<string, ExecutionView>;
   contextUsage?: Record<string, ContextUsageView>;
@@ -342,9 +354,11 @@ export interface DesktopAPI {
   testHostConnection(input: HostConnectionTestInput): Promise<HostConnectionTestResult>;
   setHostSecret(hostId: string, secret: string): Promise<void>;
   updateHostReviewMode(hostId: string, mode: ReviewMode): Promise<void>;
-  updateHostSafety(hostId: string, mode: ReviewMode, protectedReadPaths: string[], protectedWritePaths: string[]): Promise<void>;
+  updateHostSafety(hostId: string, mode: ReviewMode, protectedReadPaths: string[], protectedWritePaths: string[], sudoCacheMode?: SudoCachePolicy['mode']): Promise<void>;
   updateConversationReviewMode(taskId: string, hostId: string, mode: ReviewMode): Promise<void>;
   requestAiDenialReview(taskId: string, operationId: string): Promise<void>;
+  recoverFileTransaction(transactionId: string): Promise<import('./file-transactions.js').FileRecoveryView>;
+  readFilePreview(operationId: string): Promise<import('./file-previews.js').FilePreviewResponse>;
   readRecoveryOperationLog(operationId: string, cursor: number): Promise<{ text: string; nextCursor: number; more: boolean }>;
   acceptOperationRisk(operationId: string, explanation: string, sourceTaskId?: string, evidenceOperationIds?: string[]): Promise<void>;
   listModelProviders(): Promise<ModelProviderView[]>;
@@ -378,7 +392,7 @@ export interface DesktopAPI {
   cancelClarification(taskId: string, requestId: string): Promise<void>;
   stopOperation(conversationId: string): Promise<void>;
   decideApproval(approvalId: string, approved: boolean): Promise<void>;
-  answerInput(requestId: string, answer: string): Promise<void>;
+  answerInput(requestId: string, answer: PrivateInputAnswer): Promise<void>;
   cancelInput(requestId: string): Promise<void>;
   pauseConversation(taskId: string): Promise<void>;
   resumeConversation(taskId: string): Promise<void>;
@@ -393,3 +407,8 @@ export interface DesktopAPI {
 }
 
 export * from './message-content.js';
+
+export * from './file-transactions.js';
+export * from './file-previews.js';
+
+export * from './runtime-resources.js';

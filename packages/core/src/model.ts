@@ -20,6 +20,7 @@ export interface OperationScope {
   policyRevision: number;
   conversationRevision?: number;
   reviewerRevision?: number;
+  sudoCachePolicy?: import('./remote-runtime.js').SudoCachePolicy;
   allowedWorkingRoots: string[];
   /** Legacy combined rule; new scopes set the directional lists below. */
   protectedPaths: string[];
@@ -32,10 +33,12 @@ export interface OperationScope {
 
 export type ProposedOperation =
   | { id: string; kind: 'command'; command: string; serviceUnit?: string;
+      executionPlan?: import('./remote-runtime.js').CommandExecutionPlan;
       outputExpectation?: { expectedOutput: string; expectedExitCode?: number }; scope: OperationScope }
-  | { id: string; kind: 'write-file'; path: string; content: string; scope: OperationScope }
-  | { id: string; kind: 'upload'; localPath: string; remotePath: string; localRoot: string; contentSha256: string; size: number; scope: OperationScope }
-  | { id: string; kind: 'delete-path'; path: string; scope: OperationScope };
+  | { id: string; kind: 'write-file'; path: string; content: string; filePlan?: import('./remote-runtime.js').FileOperationPlan; scope: OperationScope }
+  | { id: string; kind: 'upload'; localPath: string; remotePath: string; localRoot: string; contentSha256: string; size: number; filePlan?: import('./remote-runtime.js').FileOperationPlan; scope: OperationScope }
+  | { id: string; kind: 'delete-path'; path: string; filePlan?: import('./remote-runtime.js').FileOperationPlan; scope: OperationScope }
+  | { id: string; kind: 'runtime'; runtime: import('./remote-runtime.js').RuntimeOperationPlan; scope: OperationScope };
 
 /** Lexical cwd relative to the operation entry directory, not remote realpath evidence. */
 export type CommandDirectory = { state: 'known'; changes: string[] } | { state: 'unknown' };
@@ -125,7 +128,7 @@ export interface OperationResult {
   authentication?: 'succeeded' | 'required' | 'failed';
   authenticationAttempts?: number;
   privilege?: import('./privilege.js').PrivilegeFeedback;
-  failureKind?: 'authentication-required' | 'permission-denied' | 'authentication-failed' | 'unsupported' | 'user-action-required' | 'unresolved-prior-operation' | 'unknown';
+  failureKind?: 'authentication-required' | 'permission-denied' | 'authentication-failed' | 'unsupported' | 'user-action-required' | 'unresolved-prior-operation' | 'conflict' | 'unknown';
   effects?: 'none' | 'possible';
   stdoutTail: string;
   /** Redacted observation counts; not evidence of process exit or durable log retention. */
@@ -134,6 +137,7 @@ export interface OperationResult {
   cwd?: string;
   /** Authentication or an unsupported interaction requires an explicit user decision. */
   requiresUserAction?: boolean;
+  fileTransaction?: import('./remote-runtime.js').FileTransactionRecord;
   /** Runtime-only evidence that a handed-over PTY command actually left the foreground. */
   remoteCompletion?: Promise<'exited' | 'unknown'>;
 }
@@ -148,6 +152,7 @@ export interface ApprovalRequest {
   targets?: string[];
   scriptSha256?: string;
   expiresAt: number;
+  filePreview?: import('./remote-runtime.js').FileApprovalPreview;
 }
 
 export interface InputRequest {
@@ -164,4 +169,5 @@ export interface InputRequest {
   prompt: string;
   choices?: string[];
   expiresAt: number;
+  allowPasswordCache?: boolean;
 }

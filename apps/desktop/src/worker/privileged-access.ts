@@ -4,7 +4,8 @@ import type { RuntimeHost } from '@cloudhelm/contracts/runtime';
 
 export interface PrivilegedTaskAccess {
   request(host: RuntimeHost, command: string, cwd: string, reason: string, goal: string,
-    gate: SafetyGate, signal?: AbortSignal, intent?: OperationScope['intent'], method?: PrivilegeMethod): Promise<
+    gate: SafetyGate, signal?: AbortSignal, intent?: OperationScope['intent'], method?: PrivilegeMethod, purpose?: 'execute' | 'recover',
+    policy?: Pick<OperationScope, 'conversationRevision' | 'reviewerRevision'>): Promise<
       { sessionId: string; method: 'ssh' | 'su'; runAs: 'root' }
       | { sessionId: string; method: 'sudo'; state: 'prepared'; loginAs: string; targetRunAs: 'root'; identityVerified: false }>;
   prepare?(operation: ProposedOperation): Promise<ProposedOperation>;

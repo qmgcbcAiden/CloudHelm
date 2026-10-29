@@ -6,7 +6,8 @@
 | --- | --- |
 | Node.js | 24 |
 | pnpm | 11.9.0，与根 `package.json` 一致 |
-| Python | CI 使用 3.12，供原生依赖构建 |
+| Python | CI 使用 3.12，仅供本地 Node 原生依赖构建；远端不要求 Python |
+| Go | 固定 1.27.3；creack/pty 1.1.24、x/sys 0.49.0，见 go.mod/go.sum |
 | macOS | Xcode Command Line Tools／Clang |
 | Windows | Visual Studio 2022 C++ Build Tools 与 Windows SDK |
 
@@ -14,6 +15,7 @@
 
 ```sh
 pnpm install --frozen-lockfile
+pnpm build:native
 pnpm dev
 ```
 
@@ -180,3 +182,9 @@ pnpm --filter @cloudhelm/desktop exec electron-builder --win nsis --x64 --publis
 6. PR 说明问题、最终行为、测试证据和剩余限制，等待维护者审核；不要自动合并或覆盖对方分支。
 
 提交代码或 PR 前检查差异，避免加入私钥、API Key、用户数据库、个人终端日志及本地构建产物。文档修改只需核对命令、链接与实现是否一致；不必为纯文字修改编写实现镜像测试。
+
+## 原生组件验收
+
+`pnpm build:native` 使用固定 Go 版本及 `CGO_ENABLED=0` 构建两种 Linux ELF，生成 SHA-256 清单。`CLOUDHELM_GO` 可指定固定工具链路径；不接受静默使用不同版本。`verify-native-helper.mjs` 检查 ELF 架构、程序头、无动态解释器/依赖及工件摘要；三种桌面包的真实 Electron 冒烟都检查随包的两种工件。
+
+`.github/workflows/native-linux.yml` 使用专用隔离账户、合成凭据、临时 sshd 和 PAM，执行 amd64/arm64 × glibc/musl。`Tests/native/` 的测试通过真实 SSH 字节流驱动组件。跳过不算通过；SELinux 使用专用 enforcing 环境，普通容器无法代替该证据。当前修复轮的运行结果记录在 [TOOLS_REPAIR_STATUS.md](TOOLS_REPAIR_STATUS.md)。

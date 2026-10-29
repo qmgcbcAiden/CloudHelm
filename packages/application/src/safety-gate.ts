@@ -29,7 +29,7 @@ export class SafetyGate {
 
   constructor(private readonly deps: SafetyGateDependencies) {}
 
-  async execute(proposed: ProposedOperation, signal?: AbortSignal, manualReview = false): Promise<GateOutcome> {
+  async execute(proposed: ProposedOperation, signal?: AbortSignal, manualReview = false, filePreview?: import('@cloudhelm/core').FileApprovalPreview): Promise<GateOutcome> {
     if (this.inFlight.has(proposed.id)) throw new Error('Operation is already in progress');
     this.inFlight.add(proposed.id);
     try {
@@ -128,12 +128,12 @@ export class SafetyGate {
           await this.deps.audit.decided(operation.id, canceled, fingerprint);
           return { decision: canceled };
         }
-        const request = { id: randomUUID(), operation, fingerprint, ruleId: safety.ruleId, reason: safety.reason,
+        const request = { id: randomUUID(), operation, filePreview, fingerprint, ruleId: safety.ruleId, reason: safety.reason,
           impact: safety.impact,
           targets: operation.kind === 'command' ? [...new Set([
             ...(analysis?.redirectTargets ?? []),
             ...(analysis?.calls.flatMap((call) => call.args.filter((arg) => /^(?:\/|\.\.?\/)/u.test(arg))) ?? [])
-          ])].slice(0, 8) : [operation.kind === 'upload' ? operation.remotePath : operation.path],
+          ])].slice(0, 8) : [operation.kind === 'runtime' ? operation.runtime.directory : operation.kind === 'upload' ? operation.remotePath : operation.path],
           scriptSha256: inspectedScript?.sha256, expiresAt: Date.now() + 10 * 60_000 };
         const approval = stillCurrent() ? await this.awaitApproval(request, signal) : 'stale';
         safety = !stillCurrent() || approval === 'stale'

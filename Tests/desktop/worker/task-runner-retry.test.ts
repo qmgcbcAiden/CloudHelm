@@ -22,7 +22,7 @@ it('retries the post-tool HTTP request without repeating the completed remote ac
     stdoutTail: 'disk observation', exitCode: 0, effects: 'none' as const }));
   const events: Parameters<TaskSignals['event']>[0][] = [];
   const runner = new TaskRunner(task, [host], { provider: 'cloudhelm-custom', modelId: 'fixture', apiKey: 'dummy', baseUrl: fixture.baseUrl }, [],
-    terminal, { execute }, async () => terminal.open(host.id, { write() { throw new Error('No real shell'); }, resize() {}, close() {}, onData() {}, onClose() {} }, task.id, '/tmp'),
+    terminal, { execute }, async () => terminal.open(host.id, { close() {}, onData() {}, onClose() {} }, task.id, '/tmp'),
     { event: (event) => events.push(event), requestApproval: async () => false, cancelApproval() {} });
   try {
     await runner.start();

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
@@ -8,7 +8,7 @@ import { TaskRunner, type TaskSignals } from './task-runner-fixture.js';
 import { openAiFixture } from './openai-sse-fixture.js';
 
 it.each(['new-pages', 'same-page', 'plans'] as const)('uses real observation progress for %s', async (mode) => {
-  const root = await mkdtemp(join(tmpdir(), 'cloudhelm-progress-')); const file = join(root, 'selected.txt');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'cloudhelm-progress-'))); const file = join(root, 'selected.txt');
   await writeFile(file, Array.from({ length: 20 }, (_, index) => `Observed line ${index + 1}`).join('\n'));
   let count = 0;
   const fixture = await openAiFixture(async () => {

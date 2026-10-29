@@ -114,7 +114,7 @@ it('adds migration 9 without declaring unexamined historical records repaired', 
   expect(store.get('operations', 'unknown')).toEqual(original);
   const inspection = new Database(file);
   try {
-    expect(inspection.prepare('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1').get()).toEqual({ version: 11 });
+    expect(inspection.prepare('SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1').get()).toEqual({ version: 12 });
     expect(inspection.prepare('SELECT * FROM data_repairs').all()).toEqual([]);
   } finally { inspection.close(); }
 });

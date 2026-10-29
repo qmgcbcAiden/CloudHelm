@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { InputRequest } from '@cloudhelm/core';
+import { privateAnswerValue, type InputRequest } from '@cloudhelm/core';
 import { InteractionCoordinator } from '../../packages/application/src/interaction-coordinator.js';
 
 describe('input request lifecycle', () => {
@@ -11,7 +11,7 @@ describe('input request lifecycle', () => {
       { opened: (value) => { request = value; }, closed() {} });
     const details = { operationId: 'op', taskId: 'task', hostId: 'host', terminalId: 'pty', terminalGeneration: 1,
       connectionGeneration: 1, kind: 'secret' as const, recipient: 'sudo', reason: 'Install package', prompt: 'Password' };
-    const result = coordinator.request(details, { isWaiting: () => true, deliver: async (_request, value) => { writes.push(value); return true; } });
+    const result = coordinator.request(details, { isWaiting: () => true, deliver: async (_request, value) => { writes.push(privateAnswerValue(value)!); return true; } });
     generation++;
     expect(await coordinator.answer(request.id, 'late-secret')).toBe(false);
     expect(await result).toBe('expired');

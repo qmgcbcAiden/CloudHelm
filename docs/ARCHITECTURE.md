@@ -9,7 +9,7 @@
 | 桌面与语言 | Electron 44.5.1、Node.js 24、严格 TypeScript |
 | 界面 | React 19、CSS Modules、CSS 变量、Zustand |
 | 工程 | pnpm workspace、electron-vite、electron-builder |
-| 终端与 SSH | xterm.js 6、ssh2 1.17 |
+| 终端与 SSH | xterm.js 6、ssh2 1.17；Go 1.27.3 静态 Linux amd64/arm64 组件 |
 | 模型 | `@earendil-works/pi-ai`、`@earendil-works/pi-agent-core` 0.99.1 |
 | AI 审核 | Pi 分类接口调用 Vercel Gateway 的 `typesafe-ai/jev`，或当前模型独立审核 |
 | Shell 分析 | web-tree-sitter 与随应用分发的 Bash WASM |
@@ -45,7 +45,7 @@ flowchart LR
   M --> D[SQLite / safeStorage]
   M <-->|带 ID 的 RPC 与事件| W[独立 utility process]
   W --> A[Pi Agent / 安全协调]
-  A --> S[ssh2 / 专用 SSH PTY / SFTP]
+  A --> S[ssh2 / 原生字节流协议 / 人工 SSH PTY]
   S --> H[用户选定的服务器]
 ```
 
@@ -53,7 +53,7 @@ flowchart LR
 - **Preload**：通过 `contextBridge` 暴露明确的 `DesktopAPI`；窗口开启 context isolation、sandbox，关闭 Node integration。
 - **Main**：窗口、系统文件选择器、凭据加解密、持久化、IPC 参数处理、运行进程管理。
 - **Utility process**：SSH 连接、终端控制、Pi 循环、命令审核、文件操作、输入桥和结果核验。
-- **远端**：没有常驻 CloudHelm Agent；首次获批执行时通过 SFTP 放置固定的 Python 3 进程传输组件，每次操作短暂启动；会话关闭时清理，断线时清理可能延后。不生成包含业务命令的包装脚本。
+- **远端**：没有常驻 CloudHelm Agent；独立审核后通过固定 SSH 字节流部署随包携带的 Go 组件，核验长度、SHA-256 和协议版本，每次操作短暂启动；运行目录与清理均有主进程资源记录。无 Python、SFTP 或远端常驻服务前置依赖。没有允许的可执行目录时拒绝 Agent 操作，人工 SSH 仍可使用。
 
 ## 对话与主机修订
 
@@ -76,7 +76,7 @@ flowchart LR
 | [InteractionCoordinator](../packages/application/src/interaction-coordinator.ts) | 绑定、投递和作废操作交互请求 |
 | [WorkJournal](../apps/desktop/src/worker/work-journal.ts) | 计划、日志检索、结果核验和验收证据 |
 
-命令提议经过“身份与凭据底线 → 硬禁令 → 方向性保护路径 → Bash 解析与影响识别 → 当前对话档位 → 执行前复核”后才执行。可识别的远端脚本先经 SFTP 只读检查，执行前重查摘要。SFTP 写入、删除和上传也经过同一入口。主机写锁在跨对话间共享；仍在运行或结果未知的写操作阻止后续变更，只读核验可继续。
+命令提议经过“身份与凭据底线 → 硬禁令 → 方向性保护路径 → Bash 解析与影响识别 → 当前对话档位 → 执行前复核”后才执行。可识别的远端脚本使用原生有界快照检查，执行前重查摘要。结构化写入、删除和上传使用有版本绑定的原生文件事务，审核旧新内容与属性后才派发。主机写锁在跨对话间共享；仍在运行或结果未知的写操作阻止后续变更，只读核验可继续。
 
 Agent 终端通过结构化进程通道执行普通命令：字面量命令直接作为 argv 启动；受支持的 sudo 前台列表由 Bash AST 提取，按分号和条件连接顺序分别派发，每次派发复核授权，无法可靠解析的 sudo 形式要求停止 AI 后人工处理。其余含 Shell 语法的命令才交给 Bash 解释原文。目录和干净环境由进程 API 设置；输出与退出码分开传输，不追加 printf 标记。远端需要 Python 3，组件不可用时暂停，不降级到脚本包装。运行中的 AI 终端拒绝人工输入；停止按钮或 Ctrl+C 撤销本轮执行权限并尝试中断远端命令，实际结果仍需核验。空闲终端自动释放供人工输入；只有用户发送消息或明确继续才启动 AI 并按需新建受控会话。用户中断元数据附在操作与历史消息上，下一轮及重启恢复时保留。
 
@@ -153,3 +153,11 @@ Python 3 的 POSIX/pty 依赖检查按 SSH 连接代次缓存成功结果；每�
 
 
 思考内容直接投影 Pi AssistantMessage 的可见 thinking 块，Responses API 的该内容标为思考摘要；签名和 redacted 加密载荷不进入展示、普通日志或自定义模型输入。流式更新每 60ms 合并为运行期快照，消息结束后按 SDK entry ID 保存展示缓存，原生 transcript 仍是恢复来源。旧缓存恢复时可按同一 entry ID 补齐思考字段，不重复插入消息。显示折叠区域、未返回和中断状态；不会用普通回复文本或模型自行生成的解释冒充思考内容。停止保留 SDK 实际收到的内容，进程崩溃前尚未写入原生 transcript 的片段不承诺跨重启恢复。
+
+## 原生执行与文件事务
+
+协议和组件职责见 [REMOTE_NATIVE_PROTOCOL.md](REMOTE_NATIVE_PROTOCOL.md)。`remote-runtime.ts` 定义工件、执行计划、文件快照和事务阶段；审批指纹覆盖最终计划。`NativeRuntimePreparation` 为组件安装、启动及清理生成独立操作，交给同一 SafetyGate。业务批准不能隐式授权组件安装目录。
+
+`prepareFileOperation` 将受控旧内容预览与业务计划分离。内容只进入有界审核 UI，文件计划与 SQLite 日志只持久化身份、属性摘要、版本与提交凭据。`FileOperationExecutor` 等待主进程 CAS 提交准备记录后派发；收到远端暂存阶段后再次等待主进程 ACK，再复核授权并发送 commit。worker 发出事件不代表已经落盘。
+
+迁移 0012 新增文件事务及组件资源索引、主机 sudo 缓存策略。旧缓存默认关闭，不恢复历史提权授权。原事务恢复只调用 recover，不重放 apply；原生提交凭据与当前读回一致，并在主进程保存恢复证据后，才能释放未知结果锁。

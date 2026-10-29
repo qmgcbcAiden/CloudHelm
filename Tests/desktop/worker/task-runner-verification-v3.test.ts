@@ -10,7 +10,7 @@ const host: RuntimeHost = { id: 'host', label: 'fixture', address: '192.0.2.1', 
   status: 'connected', defaultMode: 'ask', protectedPaths: [], policyRevision: 1 };
 const task = (): TaskView => ({ id: 'triangle', goal: '运行已有脚本并检查三角形输出', hostIds: ['host'], localScopes: [], status: 'draft',
   provider: 'cloudhelm-custom', modelId: 'fixture', requestCount: 0, requestLimit: 100, createdAt: 1, updatedAt: 1 });
-const channel: RawTerminal = { write() { throw new Error('No real SSH or ordinary shell input'); }, resize() {}, close() {}, onData() {}, onClose() {} };
+const channel: RawTerminal = { close() {}, onData() {}, onClose() {} };
 
 it.each(['passed', 'wrong-output', 'truncated', 'no-notes'] as const)('finishes %s without report repair loops or replaying a command', async (scenario) => {
   let requests = 0;

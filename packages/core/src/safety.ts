@@ -315,7 +315,11 @@ function isLowRiskCommand(analysis: CommandAnalysis, operation: ProposedOperatio
 function securityConfiguration(value: string, cwd: string | null): boolean {
   const target = literalPath(value, cwd);
   return !!target && (/^\/etc\/(?:ssh\/|sudoers(?:\.d\/|$)|sysctl\.d\/|iptables\/)/u.test(target)
-    || /^\/root\/\.ssh\//u.test(target) || /\/\.ssh\/authorized_keys$/u.test(target));
+    || /^\/root\/\.ssh\//u.test(target) || /\/\.ssh\/authorized_keys$/u.test(target)
+    || /^\/(?:etc\/(?:cron(?:\.[^/]+)?(?:\/|$)|crontab$|anacrontab$|systemd\/(?:system|user)(?:\/|$)|profile(?:\.d\/|$)|bash(?:\.bashrc|rc)$|zsh(?:\/|$)|environment$|rc\.local$)|(?:usr\/(?:local\/)?lib|lib)\/systemd\/(?:system|user)(?:\/|$)|var\/spool\/cron(?:\/|$))/u.test(target)
+    // Startup files and per-user units are persistent execution entry points
+    // regardless of account name or a non-standard home directory.
+    || /\/(?:\.(?:profile|bashrc|bash_profile|bash_login|bash_logout|zshrc|zprofile|zshenv|zlogin|zlogout)|\.config\/(?:systemd\/user(?:\/.*)?|fish\/(?:config\.fish|conf\.d\/.*))|\.local\/share\/systemd\/user(?:\/.*)?)$/u.test(target));
 }
 
 function highImpactCommand(analysis: CommandAnalysis, cwd: string): string | null {
@@ -406,7 +410,7 @@ export function inspectScriptSafety(operation: Extract<ProposedOperation, { kind
 }
 
 function highImpactFile(operation: ProposedOperation): boolean {
-  if (operation.kind === 'command') return false;
+  if (operation.kind === 'command' || operation.kind === 'runtime') return false;
   const target = literalPath(operation.kind === 'upload' ? operation.remotePath : operation.path, operation.scope.cwd);
   return !!target && securityConfiguration(target, operation.scope.cwd);
 }
@@ -425,6 +429,24 @@ export function decideSafety(operation: ProposedOperation, settings: SafetySetti
   if (operation.scope.reviewerRevision !== undefined && settings.reviewerRevision !== undefined
     && settings.reviewerRevision !== operation.scope.reviewerRevision) {
     return decision('error', 'reviewer-stale', 'Reviewer configuration changed after this operation was proposed');
+  }
+  if (operation.kind === 'runtime') {
+    const plan = operation.runtime;
+    if (plan.version !== 1 || plan.artifact.protocolVersion !== 1 || plan.artifact.platform !== 'linux'
+      || !['amd64', 'arm64'].includes(plan.artifact.arch) || !/^[a-f0-9]{64}$/u.test(plan.artifact.sha256)
+      || !Number.isSafeInteger(plan.artifact.size) || plan.artifact.size < 1 || plan.artifact.size > 32 * 1024 * 1024
+      || !path.posix.isAbsolute(plan.directory) || path.posix.normalize(plan.directory) !== plan.directory
+      || !/^cloudhelm-(?:run|root)-[a-f0-9-]{36}$/u.test(path.posix.basename(plan.directory))
+      || plan.executable !== `${plan.directory}/helper` || !plan.sessionId || !plan.parentOperationId) {
+      return decision('deny', 'invalid-runtime-plan', 'Native runtime plan is invalid');
+    }
+    if (writePaths(operation).some((root) => isInside(plan.directory, root) || isInside(root, plan.directory))) {
+      return decision('deny', 'protected-runtime-path', 'Native runtime path overlaps a protected resource');
+    }
+    if (plan.action === 'su-bootstrap') return highImpactDecision('runtime-root-bootstrap', 'Creates and verifies an isolated root runtime before su execution', settings);
+    if (settings.mode === 'ask') return decision('ask', 'native-runtime', 'Prepare the fixed native runtime at the declared private path');
+    if (settings.mode === 'ai-review') return decision('evaluate', 'native-runtime', 'Review the fixed native runtime and its declared lifecycle');
+    return decision('allow', 'native-runtime', 'Fixed native runtime permitted by the selected review mode');
   }
   if (operation.kind === 'upload') {
     const localRoot = path.resolve(operation.localRoot);

@@ -24,6 +24,8 @@ const shortcutSettings = { bindings: {} as Record<string, string>, enabled: true
 
 const referenceBodies = new Map<string, ReferenceBody>();
 const api: DesktopAPI = {
+  recoverFileTransaction: unsupported,
+  readFilePreview: async (operationId) => ({ status: 'unavailable', operationId, reason: 'expired-or-unavailable' }),
   quoteTerminal: async (input) => {
     const reference = { id: crypto.randomUUID(), kind: 'terminal' as const, terminalId: input.terminalId, hostId: input.hostId, hostLabel: '生产服务器', command: input.selection ? undefined : 'docker ps', capturedAt: Date.now() };
     referenceBodies.set(reference.id, { reference, original: input.selection ?? '$ docker ps\nCONTAINER ID   IMAGE\nabc123        service:latest' });
@@ -169,9 +171,10 @@ const fixture = {
     if (event.type === 'context-usage') { view.contextUsage = { ...view.contextUsage, [event.taskId]: event.value }; sync(); return; }
     emit(event);
   },
-  addInput(): void {
-    view.inputs.push({ id: 'secret1', taskId: view.conversations[0]!.id, operationId: 'op1', hostId: 'prod', title: '安装 Docker 需要管理员权限',
-      explanation: '服务器正在进行 sudo 身份验证，请输入 ubuntu 账户密码，以继续安装。', kind: 'secret', expiresAt: Date.now() + 60_000 }); sync();
+  addInput(options: { cache?: boolean; otp?: boolean } = {}): void {
+    view.inputs.push({ id: `secret${++sequence}`, taskId: view.conversations[0]!.id, operationId: 'op1', hostId: 'prod', title: '安装 Docker 需要管理员权限',
+      explanation: '服务器请求 sudo 认证信息；再次请求可能是多因素认证，不自动等于密码错误。接收方：当前 sudo 进程。',
+      kind: options.otp ? 'otp' : 'secret', allowPasswordCache: options.cache ?? false, expiresAt: Date.now() + 60_000 }); sync();
   },
   running(): void { view.operations[0]!.status = 'running'; view.operations[0]!.logRef = 'agent1'; sync(); },
   decorate(): void {

@@ -13,6 +13,8 @@ function deferred() {
 }
 
 class ControlTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
+  readonly human: import('@cloudhelm/core').HumanTerminalPort = { open() {}, write: (data) => { this.writes.push(data); }, resize() {} };
   private exited?: (code: number) => void;
   private closed?: () => void;
   commands: string[] = [];
@@ -24,7 +26,7 @@ class ControlTerminal implements RawTerminal {
   }
   complete(): void { this.exited?.(0); }
   onExit(listener: (code: number | undefined) => void): void { this.exited = listener; }
-  write(data: string): void { this.writes.push(data); }
+  interrupt(): boolean { this.writes.push('\u0003'); return true; }
   resize(): void {}
   close(): void { this.closed?.(); }
   onData(): void {}

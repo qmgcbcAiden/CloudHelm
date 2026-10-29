@@ -8,7 +8,7 @@ async function sourceFiles(directory) {
   const found = await Promise.all(entries.map(async (entry) => {
     if (entry.isDirectory() && ['node_modules', 'out', 'dist', '.cache'].includes(entry.name)) return [];
     const name = path.join(directory, entry.name);
-    return entry.isDirectory() ? sourceFiles(name) : /\.(?:ts|tsx|css|mjs|cjs)$/u.test(entry.name) ? [name] : [];
+    return entry.isDirectory() ? sourceFiles(name) : /\.(?:ts|tsx|css|mjs|cjs|go)$/u.test(entry.name) ? [name] : [];
   }));
   return found.flat();
 }

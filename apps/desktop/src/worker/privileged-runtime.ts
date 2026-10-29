@@ -1,14 +1,27 @@
+import path from 'node:path';
+import type { NativeRuntimePreparation } from './native-runtime-preparation.js';
+import type { FileExecutionFactory } from './file-operation-executor.js';
+import { buildCommandExecutionPlan, isEffectFreeQuery, type RuntimeOperationPlan } from '@cloudhelm/core';
 import { randomUUID } from 'node:crypto';
 import { PrivilegedSessions, type SafetyGate, type TerminalManager } from '@cloudhelm/application';
 import { BashAnalyzer, SshCommandTerminal, SshTransport, SuSession } from '@cloudhelm/adapters';
 import { PrivilegeError, sudoContextCommand, type PrivilegeMethod } from '@cloudhelm/core';
-import type { ExecutionOptions, OperationExecutor, OperationResult, OperationIntent, ProposedOperation, RawTerminal } from '@cloudhelm/core';
+import type { AgentExecutionPort, ExecutionOptions, OperationExecutor, OperationResult, OperationIntent, OperationScope, ProposedOperation, RawTerminal } from '@cloudhelm/core';
 import type { InputRequestView } from '@cloudhelm/contracts';
 import type { RuntimeHost } from '@cloudhelm/contracts/runtime';
 import type { PrivilegedTaskAccess } from './privileged-access.js';
 import { FileOperationExecutor } from './file-operation-executor.js';
 
 class DeferredTerminal implements RawTerminal {
+  readonly agent: AgentExecutionPort = {
+    execute: (...args) => this.execute(...args), onExit: (listener) => this.onExit(listener),
+    onExecutionFailure: (listener) => this.onExecutionFailure(listener), onAuthentication: (listener) => this.onAuthentication(listener),
+    answerAuthentication: (...args) => this.answerAuthentication(...args),
+    confirmInput: (...args) => this.target?.agent?.confirmInput?.(...args) ?? false,
+    interrupt: (id) => this.target?.agent?.interrupt?.(id) ?? false,
+    respondToTerminalQuery: (...args) => this.target?.agent?.respondToTerminalQuery?.(...args) ?? false,
+    resize: (...args) => this.target?.agent?.resize?.(...args)
+  };
   target?: RawTerminal;
   private data = (_value: string) => {};
   private display = (_value: string) => {};
@@ -21,21 +34,19 @@ class DeferredTerminal implements RawTerminal {
   attach(target: RawTerminal): void {
     if (this.ended) { target.close(); throw new Error('Root terminal closed'); }
     this.target = target; target.onData(this.data); target.onDisplay?.(this.display);
-    target.onExecutionFailure?.(this.failure); target.onExit?.(this.exit); target.onAuthentication?.(this.authentication); target.onClose(() => this.finishClose());
+    target.agent?.onExecutionFailure?.(this.failure); target.agent?.onExit?.(this.exit); target.agent?.onAuthentication?.(this.authentication); target.onClose(() => this.finishClose());
   }
   onData(listener: (value: string) => void): void { this.data = listener; }
   onDisplay(listener: (value: string) => void): void { this.display = listener; }
   onExecutionFailure(listener: typeof this.failure): void { this.failure = listener; }
   onExit(listener: (value: number | undefined) => void): void { this.exit = listener; }
-  onAuthentication(listener: typeof this.authentication): void { this.authentication = listener; this.target?.onAuthentication?.(listener); }
-  answerAuthentication(id: string, answer: string | null): boolean { return this.target?.answerAuthentication?.(id, answer) ?? false; }
+  onAuthentication(listener: typeof this.authentication): void { this.authentication = listener; this.target?.agent?.onAuthentication?.(listener); }
+  answerAuthentication(id: string, answer: string | null): boolean { return this.target?.agent?.answerAuthentication?.(id, answer) ?? false; }
   onClose(listener: () => void): void { this.closed = listener; }
-  execute(command: string, cwd: string, current: () => boolean): Promise<void> {
-    if (!this.target?.execute) throw new Error('Root session not authenticated');
-    return this.target.execute(command, cwd, current);
+  execute(command: string, cwd: string, current: () => boolean, context?: import('@cloudhelm/core').RawTerminalExecutionContext): Promise<void> {
+    if (!this.target?.agent) throw new Error('Root session not authenticated');
+    return this.target.agent.execute(command, cwd, current, context);
   }
-  write(value: string): void { this.target?.write(value); }
-  resize(cols: number, rows: number): void { this.target?.resize(cols, rows); }
   takeOver(): void { queueMicrotask(this.revoke); }
   close(): void { this.target?.close(); this.finishClose(); }
   private finishClose(): void {
@@ -46,10 +57,12 @@ class DeferredTerminal implements RawTerminal {
 interface Entry {
   id: string; taskId: string; host: RuntimeHost; mode: PrivilegeMethod; terminalId: string;
   raw: DeferredTerminal; controller: AbortController; sourceGeneration: number;
-  ssh?: SshTransport; su?: SuSession; executor?: OperationExecutor; probeId: string;
+  transportController: AbortController;
+  ssh?: SshTransport; su?: SuSession; executor?: OperationExecutor; probeId: string; runtimePlan?: RuntimeOperationPlan;
 }
 interface Dependencies {
-  terminal: TerminalManager; ssh: SshTransport; ordinary: OperationExecutor;
+  terminal: TerminalManager; ssh: SshTransport; ordinary: OperationExecutor; commands: OperationExecutor;
+  runtime: NativeRuntimePreparation; files: FileExecutionFactory;
   jump(host: RuntimeHost): RuntimeHost | undefined;
   input(request: Omit<InputRequestView, 'id' | 'expiresAt'>, signal: AbortSignal): Promise<string | null>;
 }
@@ -63,7 +76,7 @@ export class PrivilegedRuntime implements OperationExecutor {
 
   forTask(taskId: string): PrivilegedTaskAccess {
     return {
-      request: (host, command, cwd, reason, goal, gate, signal, intent, method) => this.request(taskId, host, command, cwd, reason, goal, gate, signal, intent, method),
+      request: (host, command, cwd, reason, goal, gate, signal, intent, method, purpose, policy) => this.request(taskId, host, command, cwd, reason, goal, gate, signal, intent, method, purpose, policy),
       prepare: async (operation) => { if (operation.scope.taskId !== taskId) throw new Error('Context outside task'); return this.prepare(operation); },
       sudoContexts: () => [...this.entries.values()].flatMap((entry) => {
         try {
@@ -95,7 +108,8 @@ export class PrivilegedRuntime implements OperationExecutor {
   }
 
   private async request(taskId: string, host: RuntimeHost, command: string, cwd: string, reason: string, goal: string,
-    gate: SafetyGate, signal?: AbortSignal, intent?: OperationIntent, method: PrivilegeMethod = 'sudo'): ReturnType<PrivilegedTaskAccess['request']> {
+    gate: SafetyGate, signal?: AbortSignal, intent?: OperationIntent, method: PrivilegeMethod = 'sudo', purpose: 'execute' | 'recover' = 'execute',
+    policy?: Pick<OperationScope, 'conversationRevision' | 'reviewerRevision'>): ReturnType<PrivilegedTaskAccess['request']> {
     if (this.requesting.has(taskId)) throw new Error('Root session request already pending');
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -116,7 +130,8 @@ export class PrivilegedRuntime implements OperationExecutor {
       const grant = this.grants.begin(taskId, host.id, choice === '使用 sudo（推荐）' ? 'sudo' : choice === 'SSH 登录 root' ? 'ssh' : 'su');
       const raw = new DeferredTerminal(() => this.close(grant.id));
       const terminalId = this.deps.terminal.open(host.id, raw, taskId, cwd);
-      entry = { id: grant.id, taskId, host, mode: grant.mode, raw, terminalId, controller: grant.controller, sourceGeneration, probeId };
+      entry = { id: grant.id, taskId, host, mode: grant.mode, raw, terminalId, controller: grant.controller,
+        transportController: new AbortController(), sourceGeneration, probeId };
       this.entries.set(entry.id, entry);
       if (entry.mode === 'sudo') {
         entry.executor = this.deps.ordinary;
@@ -127,13 +142,32 @@ export class PrivilegedRuntime implements OperationExecutor {
       const stop = () => this.close(grant.id);
       controller.signal.addEventListener('abort', stop, { once: true });
       try {
-        const outcome = await gate.execute({ id: probeId, kind: 'command', command: 'id -u', scope: {
+        const probe: ProposedOperation = { id: probeId, kind: 'command', command: 'id -u', scope: {
           taskId, hostId: host.id, terminalId, terminalGeneration: this.deps.terminal.currentGeneration(terminalId),
           cwd, runAs: 'root', loginAs: entry.mode === 'ssh' ? 'root' : host.username, sessionId: entry.id, connectionGeneration: 1,
-          policyRevision: host.policyRevision, allowedWorkingRoots: ['/'], protectedPaths: [...host.protectedPaths],
+          ...policy, policyRevision: host.policyRevision, allowedWorkingRoots: ['/'], protectedPaths: [...host.protectedPaths],
           protectedReadPaths: [...(host.protectedReadPaths ?? host.protectedPaths)],
           protectedWritePaths: [...(host.protectedWritePaths ?? host.protectedPaths)], goal, intent
-        } }, controller.signal);
+        } };
+        probe.executionPlan = buildCommandExecutionPlan(await new BashAnalyzer().analyze(probe.command), 'root');
+        const current = () => {
+          controller.signal.throwIfAborted();
+          if (entry!.sourceGeneration !== this.deps.ssh.connectionGeneration(host.id)
+            || !this.deps.terminal.isAgentOwner(terminalId)) throw new Error('Root setup expired');
+          this.grants.get(entry!.id, taskId, host.id, true);
+        };
+        if (entry.mode === 'ssh') {
+          await this.authenticate(entry, current);
+          await this.deps.runtime.ensure(probe, gate, entry.ssh!, host.runtimeDirectory, controller.signal, purpose);
+        } else {
+          const info = await this.deps.runtime.ensure(probe, gate, this.deps.ssh, host.runtimeDirectory, controller.signal, purpose);
+          const directory = path.posix.join(host.runtimeDirectory ?? '/tmp', `cloudhelm-root-${randomUUID()}`);
+          entry.runtimePlan = { version: 1, action: 'su-bootstrap', directory, executable: `${directory}/helper`,
+            artifact: info.artifact, sessionId: entry.id, purpose: 'execute', parentOperationId: probeId };
+          await this.deps.runtime.bootstrap(probe, entry.runtimePlan, gate, this.deps.ssh,
+            (runtimeCurrent) => this.authenticate(entry!, () => { current(); runtimeCurrent(); }), controller.signal);
+        }
+        const outcome = await gate.execute(probe, controller.signal);
         if (outcome.result?.status !== 'succeeded' || outcome.result.stdoutTail.trim() !== '0') {
           if (outcome.result?.privilege) throw new PrivilegeError(outcome.result.privilege);
           throw new Error('Root identity could not be verified; session closed');
@@ -142,7 +176,10 @@ export class PrivilegedRuntime implements OperationExecutor {
         return { sessionId: entry.id, method: entry.mode, runAs: 'root' };
       } finally { controller.signal.removeEventListener('abort', stop); }
     } catch (error) {
-      if (entry) this.close(entry.id);
+      if (entry) {
+        try { this.close(entry.id); }
+        finally { if (purpose === 'recover') await this.deps.runtime.abandonSession(taskId, entry.id); }
+      }
       throw error;
     } finally {
       signal?.removeEventListener('abort', abort);
@@ -159,7 +196,7 @@ export class PrivilegedRuntime implements OperationExecutor {
       this.grants.get(entry.id, operation.scope.taskId, operation.scope.hostId);
     };
     check();
-    if (entry!.mode !== 'ssh' && operation.kind !== 'command') throw new Error('sudo/su do not elevate SFTP; no file operation sent. Use ordinary-account nonsecret staging and separately reviewed commands.');
+    if (entry!.mode !== 'ssh' && operation.kind !== 'command') throw new Error('Structured file transactions require login or root SSH identity; no file operation sent. Use ordinary-account nonsecret staging and separately reviewed commands.');
     if (entry!.mode !== 'sudo' || operation.kind !== 'command') return operation;
     const command = sudoContextCommand(await new BashAnalyzer().analyze(operation.command));
     check();
@@ -172,7 +209,7 @@ export class PrivilegedRuntime implements OperationExecutor {
     const current = () => {
       if (!entry || entry.controller.signal.aborted || signal?.aborted || options?.isAuthorized?.() === false
         || entry.sourceGeneration !== this.deps.ssh.connectionGeneration(entry.host.id)
-        || operation.scope.terminalId !== entry.terminalId || operation.scope.runAs !== 'root'
+        || operation.scope.terminalId !== entry.terminalId || !operation.scope.runAs
         || operation.scope.loginAs !== (entry.mode === 'ssh' ? 'root' : entry.host.username) || operation.scope.connectionGeneration !== 1) throw new Error('Root operation authorization expired');
       this.grants.get(entry.id, operation.scope.taskId, operation.scope.hostId, operation.id === entry.probeId);
     };
@@ -180,24 +217,15 @@ export class PrivilegedRuntime implements OperationExecutor {
     const active = entry!;
     if (active.mode === 'sudo') {
       if (operation.kind !== 'command') return { operationId: operation.id, status: 'failed', failureKind: 'unsupported', effects: 'none',
-        stdoutTail: 'sudo contexts do not elevate SFTP. Stage nonsecret files as the login user, then submit a separately reviewed sudo install command.' };
+        stdoutTail: 'Structured file transactions do not use sudo. Stage nonsecret files as the login user, then submit a separately reviewed sudo install command.' };
       try {
         if (sudoContextCommand(await new BashAnalyzer().analyze(operation.command)) !== operation.command) throw new Error('Unprepared');
       } catch { return { operationId: operation.id, status: 'failed', failureKind: 'unsupported', effects: 'none',
         stdoutTail: 'Unprepared sudo operation refused before dispatch. Submit a supported literal command through the normal tool preparation and review.' }; }
       current();
     }
-    if (!active.executor) {
-      if (operation.id !== active.probeId || operation.kind !== 'command' || operation.command !== 'id -u') throw new Error('Root setup must verify identity first');
-      try { await this.authenticate(active, current); }
-      catch (error) {
-        const privilege = error instanceof PrivilegeError ? error.feedback : { method: active.mode, stage: 'authentication' as const,
-          code: 'authentication-unconfirmed' as const, source: 'transport' as const, businessCommand: 'not-started' as const, recovery: 'user-action' as const };
-        this.close(active.id);
-        return { operationId: operation.id, status: 'failed', failureKind: 'authentication-failed', effects: 'none', requiresUserAction: true, privilege,
-          stdoutTail: 'Root identity was not established. No business command was sent. Explicit user continuation is required.' };
-      }
-    }
+    if (!active.executor) return { operationId: operation.id, status: 'failed', effects: 'none', failureKind: 'unsupported',
+      stdoutTail: 'Root runtime has not been prepared and reviewed; business operation not started.' };
     current();
     return active.executor!.execute(operation, fingerprint, signal, options);
   }
@@ -242,26 +270,50 @@ export class PrivilegedRuntime implements OperationExecutor {
           source: 'transport', businessCommand: 'not-started', recovery: 'user-action' });
       }
       transport = ssh;
-      entry.executor = new FileOperationExecutor(this.deps.terminal, ssh, this.deps.terminal);
+      entry.executor = new FileOperationExecutor(this.deps.terminal, ssh, this.deps.commands, this.deps.files);
     } else {
-      const su = new SuSession(this.deps.ssh, entry.host.id, entry.controller.signal, () => this.close(entry.id)); entry.su = su;
-      await su.connect(() => input('su root 身份验证（root 密码）', `接收方：${entry.host.label} 上本次操作的 su 认证进程。通常需要 root 账户密码，不是 ${entry.host.username} 的 sudo 密码。不知道 root 密码请取消，明确选择 sudo。密码不会发送给业务命令。`), current);
+      const su = new SuSession(this.deps.ssh, entry.host.id, entry.transportController.signal, () => this.close(entry.id)); entry.su = su;
+      await su.connect(() => input('su root 身份验证（root 密码）', `接收方：${entry.host.label} 上本次操作的 su 认证进程。通常需要 root 账户密码，不是 ${entry.host.username} 的 sudo 密码。不知道 root 密码请取消，明确选择 sudo。密码不会发送给业务命令。`), current, { version: 1, sessionId: entry.id, operationId: entry.probeId, generation: 1,
+        rootDirectory: entry.runtimePlan!.directory, artifactSha256: entry.runtimePlan!.artifact.sha256 });
       transport = su;
       entry.executor = { execute: (operation, fingerprint, signal, options) => operation.kind === 'command'
-        ? this.deps.terminal.execute(operation, fingerprint, signal, options)
+        ? this.deps.commands.execute(operation, fingerprint, signal, options)
         : Promise.resolve({ operationId: operation.id, status: 'failed', failureKind: 'unsupported', effects: 'none',
-          stdoutTail: 'su does not elevate SFTP. Stage nonsecret content with the ordinary account, then use a separately reviewed root install command.' }) };
+          stdoutTail: 'Structured file transactions do not use su. Stage nonsecret content with the ordinary account, then use a separately reviewed root install command.' }) };
     }
     current();
     entry.raw.attach(new SshCommandTerminal(transport, entry.host.id));
   }
 
+  fileTransport(operation: ProposedOperation): SshTransport {
+    if (!operation.scope.sessionId) return this.deps.ssh;
+    const entry = this.entries.get(operation.scope.sessionId);
+    if (!entry || entry.taskId !== operation.scope.taskId || entry.host.id !== operation.scope.hostId) throw new Error('Privilege context expired');
+    this.grants.get(entry.id, entry.taskId, entry.host.id);
+    if (entry.mode !== 'ssh' || !entry.ssh) throw new Error('Structured files require login or root SSH identity');
+    return entry.ssh;
+  }
+
+  async prepareNative(operation: ProposedOperation, gate: SafetyGate, base?: string, signal?: AbortSignal): Promise<void> {
+    const entry = operation.scope.sessionId ? this.entries.get(operation.scope.sessionId) : undefined;
+    const purpose = operation.kind === 'command' && isEffectFreeQuery(await new BashAnalyzer().analyze(operation.command)) ? 'recover' : 'execute';
+    if (entry?.mode === 'su') {
+      if (!entry.runtimePlan) throw new Error('Root runtime unavailable');
+      await this.deps.runtime.bootstrap(operation, { ...entry.runtimePlan, action: 'launch', purpose, parentOperationId: operation.id },
+        gate, this.deps.ssh, async () => {}, signal);
+    } else await this.deps.runtime.ensure(operation, gate, entry?.ssh ?? this.deps.ssh, base, signal, purpose);
+  }
+
   private close(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
-    this.entries.delete(id); this.grants.close(id);
-    if (this.deps.terminal.hostOf(entry.terminalId)) this.deps.terminal.close(entry.terminalId);
-    entry.su?.close(); entry.ssh?.close();
+    this.entries.delete(id);
+    const closeTransport = () => { entry.transportController.abort(); entry.su?.close(); entry.ssh?.close(); };
+    const retained = this.deps.runtime.retireSession(entry.taskId, entry.id, closeTransport,
+      entry.su ? (current) => entry.su!.cleanupRuntime(current) : undefined);
+    this.grants.close(id);
+    try { if (this.deps.terminal.hostOf(entry.terminalId)) this.deps.terminal.close(entry.terminalId); }
+    finally { if (!retained) closeTransport(); }
   }
   private closeTask(taskId: string): void {
     this.requesting.get(taskId)?.abort();

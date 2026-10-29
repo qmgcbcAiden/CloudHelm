@@ -86,6 +86,11 @@ jobs:
           clang --version
       - name: Install locked dependencies and approved native builds
         run: pnpm install --frozen-lockfile
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.27.3'
+      - name: Build and verify both static remote components
+        run: pnpm build:native
       - name: Types, policies, and unit/integration tests
         run: pnpm check
       - name: Install browser for renderer smoke
@@ -97,6 +102,9 @@ jobs:
       - name: Safe Markdown rendering and copy-only code blocks
         timeout-minutes: 10
         run: pnpm test:markdown
+      - name: Private file previews, line differences, expiry and approval authority
+        timeout-minutes: 10
+        run: pnpm test:file-preview
       - name: Build native desktop directory package
         run: pnpm --filter @cloudhelm/desktop package
       - name: Built Electron process and credential/native resources
@@ -116,6 +124,7 @@ jobs:
           path: |
             .cache/ui-smoke/*.png
             .cache/markdown-smoke/*.png
+            .cache/file-preview-smoke/*.png
             .cache/desktop-smoke/**/*.png
             .cache/desktop-smoke/**/*.log
           if-no-files-found: ignore

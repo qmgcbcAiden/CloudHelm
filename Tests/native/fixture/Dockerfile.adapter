@@ -1,0 +1,9 @@
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openssh-server openssh-client sudo util-linux bash coreutils passwd libpam-modules \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash cloudhelm
+# No native helper is included. The TS transport must stream its actual artifact.
+COPY entrypoint.sh /fixture/entrypoint.sh
+ENV CLOUDHELM_FIXTURE_EXTERNAL=1
+ENTRYPOINT ["/bin/sh", "/fixture/entrypoint.sh"]

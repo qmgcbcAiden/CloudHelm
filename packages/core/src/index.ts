@@ -19,3 +19,7 @@ export * from './service-observation.js';
 
 export * from './message-content.js';
 export * from './context-budget.js';
+export * from './remote-runtime.js';
+export * from './command-execution-plan.js';
+export * from './authentication-prompt.js';
+export * from './file-read-policy.js';

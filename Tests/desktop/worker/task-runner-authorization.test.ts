@@ -81,8 +81,7 @@ describe('remote authorization and working directories', () => {
       hostIds: [host.id], localScopes: [], provider: 'cloudhelm-custom', modelId: 'fixture', status: 'draft',
       requestCount: 0, requestLimit: 7, createdAt: 1, updatedAt: 1 };
     const terminal = new TerminalManager({ data: () => {}, state: () => {} });
-    const terminalId = terminal.open(host.id, { write: () => { throw new Error('No real SSH writes'); },
-      resize: () => {}, close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
+    const terminalId = terminal.open(host.id, { close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
     const execute = vi.fn(async (...[operation]: Parameters<OperationExecutor['execute']>) => ({ operationId: operation.id,
       status: 'succeeded' as const, exitCode: 0,
       stdoutTail: operation.kind === 'command' && operation.command === 'sudo cat /root/test/test' ? 'Hello world' : '',

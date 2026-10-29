@@ -48,6 +48,22 @@ function setup(store = new MemoryStore()) {
 const customProfile = (update: Partial<ModelProfileDraft> = {}): ModelProfileDraft => ({
   provider: 'cloudhelm-custom', modelId: 'model-one', baseUrl: 'http://localhost:1234/v1', apiKey: 'key-for-endpoint-one', ...update
 });
+
+it('persists the executable runtime directory as a new host revision and resets password caching', () => {
+  const { state, store } = setup();
+  const draft = { label: 'fixture', address: '192.0.2.1', port: 22, username: 'deploy', auth: 'agent' as const };
+  const original = state.addHost({ ...draft, runtimeDirectory: '/home/deploy/run' });
+  expect(original.sudoCachePolicy).toEqual({ mode: 'disabled', revision: 1 });
+  state.updateHost(original.id, { sudoCachePolicy: { mode: 'single-password-auto', revision: 2 } });
+  const renamed = state.editHost(original.id, { ...draft, label: 'renamed', runtimeDirectory: '/home/deploy/run' });
+  expect(renamed.id).toBe(original.id);
+  expect(renamed.sudoCachePolicy).toEqual({ mode: 'single-password-auto', revision: 2 });
+  const replacement = state.editHost(original.id, { ...draft, runtimeDirectory: '/var/tmp' });
+  expect(replacement.id).not.toBe(original.id);
+  expect(replacement.sudoCachePolicy).toEqual({ mode: 'disabled', revision: 1 });
+  expect(state.getHost(original.id)).toMatchObject({ archived: true, runtimeDirectory: '/home/deploy/run' });
+  expect(setup(store).state.getHost(replacement.id).runtimeDirectory).toBe('/var/tmp');
+});
 function conversation(state: AppState): TaskView {
   const profile = state.runtimeProfile();
   const task = state.createTask('Explain container health checks', [], profile.modelId, []);

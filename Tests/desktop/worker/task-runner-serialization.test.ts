@@ -21,7 +21,7 @@ describe('remote operation serialization', () => {
     const task: TaskView = { id: 'serial-ops', goal: '检查身份和磁盘', hostIds: [host.id], localScopes: [],
       provider: 'cloudhelm-custom', modelId: 'fixture', status: 'draft', requestCount: 0, requestLimit: 5, createdAt: 1, updatedAt: 1 };
     const terminal = new TerminalManager({ data: () => {}, state: () => {} });
-    const terminalId = terminal.open(host.id, { write: () => {}, resize: () => {}, close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
+    const terminalId = terminal.open(host.id, { close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
     let releaseFirst!: () => void;
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const started: string[] = [];

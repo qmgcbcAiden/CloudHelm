@@ -10,6 +10,7 @@ import { TaskRunner, type TaskSignals } from './task-runner-fixture.js';
 import { fixtureMessageText, openAiFixture } from './openai-sse-fixture.js';
 
 class NoExecutionTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
   async execute(): Promise<void> { throw new Error('This fixture never dispatches shell commands'); }
   write(): void { throw new Error('This fixture never accepts shell input'); }
   resize(): void {}

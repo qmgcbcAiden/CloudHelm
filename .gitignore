@@ -131,3 +131,4 @@ secrets.json
 credentials.json
 .service-account.json
 plans/*
+apps/desktop/resources/native/

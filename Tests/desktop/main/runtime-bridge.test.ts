@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RuntimeBridge } from '../../../apps/desktop/src/main/runtime-bridge.js';
 import { createRequestBudget, reserveRoundRequest } from '@cloudhelm/core';
+import { resolve } from 'node:path';
 
-const fixture = vi.hoisted(() => ({ child: undefined as unknown as import('node:events').EventEmitter & {
+const fixture = vi.hoisted(() => ({ fork: vi.fn(), child: undefined as unknown as import('node:events').EventEmitter & {
   postMessage: ReturnType<typeof vi.fn>; kill: ReturnType<typeof vi.fn>
 } }));
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events');
-  return { utilityProcess: { fork: () => {
+  return { app: { isPackaged: false, getAppPath: () => '/fixture/out/main' }, utilityProcess: { fork: (...args: unknown[]) => {
+    fixture.fork(...args);
     fixture.child = Object.assign(new EventEmitter(), { postMessage: vi.fn(), kill: vi.fn() });
     return fixture.child;
   } } };
@@ -19,6 +21,14 @@ function setup(budget?: ConstructorParameters<typeof RuntimeBridge>[4]) {
   const bridge = new RuntimeBridge(onEvent, readLog, stopped, undefined, budget);
   return { bridge, onEvent, readLog, stopped, child: fixture.child };
 }
+
+it('resolves unpackaged native resources from the main bundle rather than Electron appPath', () => {
+  const f = setup();
+  expect(fixture.fork).toHaveBeenLastCalledWith(expect.any(String), [], expect.objectContaining({ env: expect.objectContaining({
+    CLOUDHELM_NATIVE_DIR: resolve(import.meta.dirname, '../../../apps/desktop/resources/native')
+  }) }));
+  f.bridge.close();
+});
 
 describe('budget acknowledgments', () => {
   const query = { budgetRequest: { id: 'rpc', command: { kind: 'current', taskId: 'task' } } };
@@ -80,4 +90,14 @@ describe('runtime shutdown', () => {
     expect(vi.getTimerCount()).toBe(0);
     f.bridge.close();
   });
+});
+
+it('routes private file previews without ordinary events, diagnostics, log reads or responses', () => {
+  const onEvent = vi.fn(); const readLog = vi.fn(); const diagnostic = vi.fn(); const preview = vi.fn();
+  const bridge = new RuntimeBridge(onEvent, readLog, undefined, diagnostic, undefined, undefined, undefined, preview);
+  const payload = { operationId: 'operation', preview: { before: 'private old', after: 'new' } };
+  fixture.child.emit('message', { filePreview: payload });
+  expect(preview).toHaveBeenCalledWith(payload); expect(onEvent).not.toHaveBeenCalled(); expect(readLog).not.toHaveBeenCalled();
+  expect(diagnostic).not.toHaveBeenCalled(); expect(fixture.child.postMessage).not.toHaveBeenCalled();
+  bridge.close();
 });

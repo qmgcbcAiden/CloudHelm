@@ -54,6 +54,9 @@ function reviewState(operation: ProposedOperation, analysis: CommandAnalysis | u
   if (operation.kind === 'command') summary = redactOutput(operation.command);
   else if (operation.kind === 'write-file') summary = { kind: 'write-file', path: operation.path, bytes: Buffer.byteLength(operation.content) };
   else if (operation.kind === 'upload') summary = { kind: 'upload', path: operation.remotePath, bytes: operation.size, sha256: operation.contentSha256 };
+  else if (operation.kind === 'runtime') summary = { kind: 'runtime', action: operation.runtime.action,
+    directory: operation.runtime.directory, executable: operation.runtime.executable, sha256: operation.runtime.artifact.sha256,
+    bytes: operation.runtime.artifact.size, protocol: operation.runtime.version };
   else summary = { kind: 'delete-path', path: operation.path };
   return {
     host: operation.scope.hostId, account: operation.scope.runAs, cwd: operation.scope.cwd,

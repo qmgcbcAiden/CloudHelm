@@ -13,7 +13,7 @@ const reasons: Record<string, string> = {
 
 export function approvalPresentation(request: ApprovalRequest): { title: string; explanation: string; recovery: string } {
   const operation = request.operation;
-  const label = operation.kind === 'command' ? '远程命令' : operation.kind === 'write-file' ? '写入文件'
+  const label = operation.kind === 'runtime' ? '运行组件操作' : operation.kind === 'command' ? '远程命令' : operation.kind === 'write-file' ? '写入文件'
     : operation.kind === 'delete-path' ? '删除路径' : '上传文件';
   const reason = reasons[request.ruleId] ?? redactOutput(request.reason).slice(0, 240);
   return {

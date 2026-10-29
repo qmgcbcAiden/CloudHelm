@@ -59,7 +59,8 @@ export class AppState {
   constructor(private readonly store: SqliteStore, private readonly emit: (event: AppEvent) => void) {
     for (const host of store.list<HostView>('hosts')) this.hosts.set(host.id, { ...host, status: 'disconnected',
       protectedReadPaths: host.protectedReadPaths ?? host.protectedPaths ?? [],
-      protectedWritePaths: host.protectedWritePaths ?? host.protectedPaths ?? [], policyRevision: host.policyRevision ?? 1 });
+      protectedWritePaths: host.protectedWritePaths ?? host.protectedPaths ?? [], policyRevision: host.policyRevision ?? 1,
+      sudoCachePolicy: host.sudoCachePolicy ?? { mode: 'disabled', revision: 1 } });
     for (const task of store.list<TaskView>('tasks')) this.tasks.set(task.id,
       task.status === 'running' || task.status === 'waiting-review'
         ? { ...task, localScopes: task.localScopes ?? [], reviewModesByHost: task.reviewModesByHost ?? {}, reviewRevision: task.reviewRevision ?? 1, status: 'recovering' }
@@ -127,6 +128,7 @@ export class AppState {
 
   snapshot(): AppSnapshot {
     return {
+      runtimeResources: this.store.list('runtime-resources'),
       reasoningProgress: { ...this.reasoningProgress }, execution: { ...this.execution }, contextUsage: { ...this.contextUsage }, contextCompaction: { ...this.contextCompaction },
       hosts: [...this.hosts.values()], terminals: [...this.terminals.values()], conversations: [...this.tasks.values()], operations: [...this.operations.values()],
       clarifications: [...this.clarifications.values()],
@@ -142,7 +144,7 @@ export class AppState {
       throw new Error('Choose an existing direct SSH host as the single jump host');
     }
     const host: HostView = { ...draft, id: randomUUID(), status: 'disconnected', protectedPaths: [],
-      protectedReadPaths: [], protectedWritePaths: [], defaultMode: 'ask', policyRevision: 1 };
+      protectedReadPaths: [], protectedWritePaths: [], defaultMode: 'ask', policyRevision: 1, sudoCachePolicy: { mode: 'disabled', revision: 1 } };
     this.hosts.set(host.id, host);
     this.store.put('hosts', host.id, host);
     this.publish();
@@ -163,6 +165,7 @@ export class AppState {
     if (previous.archived) throw new Error('An archived host revision cannot be edited');
     const connectionChanged = previous.address !== draft.address || previous.port !== draft.port
       || previous.username !== draft.username || previous.auth !== draft.auth
+      || previous.runtimeDirectory !== draft.runtimeDirectory
       || previous.privateKeyPath !== draft.privateKeyPath || previous.jumpHostId !== draft.jumpHostId || !!newSecret;
     if (!connectionChanged) {
       const renamed = { ...previous, label: draft.label };
@@ -178,6 +181,7 @@ export class AppState {
     } else if (previous.auth === draft.auth) ciphertext = this.store.get<string>('secrets', `host:${id}`);
     const replacement: HostView = {
       ...previous, ...draft, previousHostId: previous.id, id: randomUUID(), archived: false, status: 'disconnected', policyRevision: 1,
+      sudoCachePolicy: { mode: 'disabled', revision: 1 },
       fingerprint: previous.address === draft.address && previous.port === draft.port ? previous.fingerprint : undefined
     };
     const archived = { ...previous, archived: true };

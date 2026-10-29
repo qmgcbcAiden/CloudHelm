@@ -23,6 +23,7 @@
     "version:check": "node scripts/set-version.mjs --check",
     "changelog:check": "node scripts/changelog.mjs --check",
     "test:ui": "node Tests/smoke/ui-smoke.mjs",
+    "test:file-preview": "node Tests/smoke/file-preview-smoke.mjs",
     "test:desktop": "node Tests/smoke/desktop-smoke.mjs",
     "test:desktop:packaged": "node Tests/smoke/desktop-smoke.mjs --packaged",
     "test:markdown": "node Tests/smoke/markdown-smoke.mjs",

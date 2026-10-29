@@ -7,6 +7,7 @@ import type { RuntimeHost } from '@cloudhelm/contracts/runtime';
 import { TaskRunner, type TaskSignals } from './task-runner-fixture.js';
 import { fixtureMessageText, openAiFixture } from './openai-sse-fixture.js';
 class DiagnosticTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
   commands: string[] = [];
   private exit?: (code: number | undefined) => void;
   private data?: (text: string) => void;

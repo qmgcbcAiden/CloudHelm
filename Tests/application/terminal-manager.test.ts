@@ -1,20 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import type { ProposedOperation, RawTerminal } from '@cloudhelm/core';
+import type { ProposedOperation, RawTerminal, RawTerminalExecutionContext } from '@cloudhelm/core';
 import { CommandNotStartedError, operationFingerprint } from '@cloudhelm/core';
 import { TerminalManager } from '../../packages/application/src/terminal-manager.js';
 
 class FakeTerminal implements RawTerminal {
+  readonly agent: import('@cloudhelm/core').AgentExecutionPort = this;
+  readonly human: import('@cloudhelm/core').HumanTerminalPort = { open() {}, write: (data) => { this.writes.push(data); }, resize() {},
+    respondToTerminalQuery: (data) => { this.writes.push(data); return true; } };
   writes: string[] = [];
+  closeCount = 0;
+  context?: RawTerminalExecutionContext;
   private data?: (text: string) => void;
   private closed?: () => void;
   private exited?: (code: number | undefined) => void;
   commands: Array<{ command: string; cwd: string }> = [];
-  async execute(command: string, cwd: string): Promise<void> { this.commands.push({ command, cwd }); }
+  async execute(command: string, cwd: string, _current: () => boolean, context?: RawTerminalExecutionContext): Promise<void> {
+    this.commands.push({ command, cwd }); this.context = context;
+  }
   onExit(listener: (code: number | undefined) => void): void { this.exited = listener; }
   complete(code = 0): void { this.exited?.(code); }
-  write(text: string): void { this.writes.push(text); }
+  confirmInput(_operationId: string, data: 'y\n' | 'n\n'): boolean { this.writes.push(data); return true; }
+  interrupt(): boolean { this.writes.push('\u0003'); return true; }
   resize(): void {}
-  close(): void { this.closed?.(); }
+  close(): void { this.closeCount++; this.closed?.(); }
   onData(listener: (text: string) => void): void { this.data = listener; }
   onClose(listener: () => void): void { this.closed = listener; }
   emit(text: string): void { this.data?.(text); }
@@ -115,6 +123,31 @@ describe('real PTY ownership', () => {
     expect(manager.currentGeneration(id)).toBe(-1);
     expect(states).toEqual(['agent', 'suspended', 'closed']);
   });
+});
+
+it('passes the reviewed launch plan and its operation/session/generation binding unchanged', async () => {
+  const channel = new FakeTerminal(); const manager = new TerminalManager({ data() {}, state() {} });
+  const id = manager.open('host', channel, 'task');
+  const proposed = operation('reviewed', 1); proposed.scope.terminalId = id; proposed.scope.sessionId = 'root-session';
+  if (proposed.kind !== 'command') throw new Error('fixture');
+  proposed.executionPlan = { version: 1, shell: 'bash', steps: [{ condition: 'always', argv: ['sudo', '-A', 'id'], runAs: 'root', authentication: 'sudo' }] };
+  const result = manager.execute(proposed, operationFingerprint(proposed));
+  expect(channel.context).toEqual({ operationId: 'reviewed', sessionId: 'root-session', generation: 1, plan: proposed.executionPlan });
+  channel.complete(); await result;
+});
+
+it('closes all task terminals across ownership generations, preserving unrelated human terminals', () => {
+  const manager = new TerminalManager({ data() {}, state() {} });
+  const channels = [new FakeTerminal(), new FakeTerminal(), new FakeTerminal(), new FakeTerminal()];
+  const ids = channels.map((channel, i) => manager.open('host', channel, i === 3 ? undefined : 'task'));
+  manager.suspend(ids[0]!); manager.takeOver(ids[1]!);
+  // Broken adapters must not prevent cleanup of the rest of the task.
+  channels[0]!.close = () => { channels[0]!.closeCount++; throw new Error('adapter close failed'); };
+  expect(() => manager.closeTask('task')).toThrow('部分任务终端关闭失败');
+  expect(ids.slice(0, 3).map((id) => manager.currentGeneration(id))).toEqual([-1, -1, -1]);
+  expect(channels.map((channel) => channel.closeCount)).toEqual([1, 1, 1, 0]);
+  manager.input(ids[3]!, 'pwd\n', true); expect(channels[3]!.writes).toEqual(['pwd\n']);
+  manager.close(ids[3]!);
 });
 
 it('does not leave an unresolved operation when preflight confirms no dispatch', async () => {

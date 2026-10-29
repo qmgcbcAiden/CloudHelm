@@ -35,7 +35,7 @@ describe('remote result analysis', () => {
     const task: TaskView = { id: 'failed-inspection', goal: '检查文件', hostIds: [host.id], localScopes: [],
       modelId: 'fixture', status: 'draft', requestCount: 0, requestLimit: 5, createdAt: 1, updatedAt: 1 };
     const terminal = new TerminalManager({ data: () => {}, state: () => {} });
-    const terminalId = terminal.open(host.id, { write: () => {}, resize: () => {}, close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
+    const terminalId = terminal.open(host.id, { close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
     const execute = vi.fn(async (operation: ProposedOperation) => ({ operationId: operation.id, status: 'failed' as const,
       effects: 'possible' as const, failureKind: 'permission-denied' as const, exitCode: 1, stdoutTail: 'Permission denied' }));
     const events: Parameters<TaskSignals['event']>[0][] = [];
@@ -70,7 +70,7 @@ describe('remote result analysis', () => {
     const task: TaskView = { id: 'blocked-write', goal: '检查状态', hostIds: [host.id], localScopes: [],
       provider: 'cloudhelm-custom', modelId: 'fixture', status: 'draft', requestCount: 0, requestLimit: 5, createdAt: 1, updatedAt: 1 };
     const terminal = new TerminalManager({ data: () => {}, state: () => {} });
-    const terminalId = terminal.open(host.id, { write: () => {}, resize: () => {}, close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
+    const terminalId = terminal.open(host.id, { close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
     const execute = vi.fn(async (operation: ProposedOperation) => operation.kind === 'command' && operation.command.startsWith('mkdir')
       ? { operationId: operation.id, status: 'failed' as const, effects: 'none' as const,
         failureKind: 'unresolved-prior-operation' as const, stdoutTail: 'Original operation needs verification' }
@@ -105,7 +105,7 @@ describe('remote result analysis', () => {
     const task: TaskView = { id: 'follow-up', goal: '检查磁盘占用', hostIds: [host.id], localScopes: [],
       provider: 'cloudhelm-custom', modelId: 'fixture', status: 'draft', requestCount: 0, requestLimit: 5, createdAt: 1, updatedAt: 1 };
     const terminal = new TerminalManager({ data: () => {}, state: () => {} });
-    const terminalId = terminal.open(host.id, { write: () => {}, resize: () => {}, close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
+    const terminalId = terminal.open(host.id, { close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
     const execute = vi.fn(async (operation: { id: string }, _fingerprint: string, _signal?: AbortSignal, _options?: { readOnly?: boolean }) => ({ operationId: operation.id,
       status: 'succeeded' as const, exitCode: 0, effects: 'none' as const, stdoutTail: 'CONTAINER ID', logRef: terminalId }));
     const approval = vi.fn(async () => false);
@@ -151,8 +151,7 @@ describe('remote result analysis', () => {
     const task: TaskView = { id: 'result-analysis', goal: '检查这台服务器的磁盘占用', hostIds: [host.id], localScopes: [],
       provider: 'cloudhelm-custom', modelId: 'fixture', status: 'draft', requestCount: 0, requestLimit: 5, createdAt: 1, updatedAt: 1 };
     const terminal = new TerminalManager({ data: () => {}, state: () => {} });
-    const terminalId = terminal.open(host.id, { write: () => { throw new Error('No real terminal writes allowed'); },
-      resize: () => {}, close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
+    const terminalId = terminal.open(host.id, { close: () => {}, onData: () => {}, onClose: () => {} }, task.id, '/home/ubuntu');
     const execute = vi.fn(async (operation: { id: string }) => ({ operationId: operation.id,
       status: exitCode === 0 ? 'succeeded' as const : 'failed' as const, exitCode, stdoutTail: output, logRef: terminalId }));
     const events: Parameters<TaskSignals['event']>[0][] = [];

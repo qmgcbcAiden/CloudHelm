@@ -1,7 +1,7 @@
 import type { DiagnosticEvent } from '@cloudhelm/core';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { utilityProcess, type UtilityProcess } from 'electron';
+import { app, utilityProcess, type UtilityProcess } from 'electron';
 import type { RuntimeCall, RuntimeMessage } from '@cloudhelm/contracts/runtime';
 
 interface Pending {
@@ -20,8 +20,12 @@ export class RuntimeBridge {
     private readonly readLog: (taskId: string, operationId: string, cursor: number) => import('@cloudhelm/contracts/runtime').LogPage,
     private readonly onStopped: () => void = () => {},
     private readonly diagnostic: (event: DiagnosticEvent) => void = () => {},
-    private readonly requestBudget?: (command: unknown) => import('@cloudhelm/contracts').BudgetOutcome) {
-    this.child = utilityProcess.fork(join(import.meta.dirname, 'runtime.js'), [], { serviceName: 'CloudHelm Agent and SSH runtime' });
+    private readonly requestBudget?: (command: unknown) => import('@cloudhelm/contracts').BudgetOutcome,
+    private readonly fileJournal?: (command: unknown) => { record?: import('@cloudhelm/contracts').FileTransactionViewRecord; error?: string },
+    private readonly runtimeResource?: (record: unknown) => void,
+    private readonly filePreview?: (value: unknown) => void) {
+    this.child = utilityProcess.fork(join(import.meta.dirname, 'runtime.js'), [], { serviceName: 'CloudHelm Agent and SSH runtime', env: { ...process.env,
+      CLOUDHELM_NATIVE_DIR: app.isPackaged ? join(process.resourcesPath, 'native') : join(import.meta.dirname, '../../resources/native') } });
     this.child.on('message', (message: RuntimeMessage) => this.receive(message));
     this.child.on('exit', () => {
       if (this.stopped) return;
@@ -38,7 +42,7 @@ export class RuntimeBridge {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error('Runtime request timed out'));
-      }, call.method === 'prepare-message' || call.method === 'request-ai-denial-review' ? 650_000
+      }, call.method === 'prepare-message' || call.method === 'request-ai-denial-review' || call.method === 'recover-file-transaction' ? 650_000
         : call.method === 'connect' ? 180_000 : call.method === 'test-host' ? 60_000 : 30_000);
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timeout });
       try { this.child.postMessage({ id, call }); }
@@ -52,7 +56,25 @@ export class RuntimeBridge {
 
   private receive(message: RuntimeMessage): void {
     if (this.closing || this.stopped) return;
+    if ('filePreview' in message) {
+      try { this.filePreview?.(message.filePreview); } catch { /* Private UI data is discarded, never logged. */ }
+      return;
+    }
     if ('diagnostic' in message) { this.diagnostic(message.diagnostic); return; }
+    if ('fileJournalRequest' in message) {
+      const query = message.fileJournalRequest;
+      let result: { record?: import('@cloudhelm/contracts').FileTransactionViewRecord; error?: string };
+      try { result = this.fileJournal?.(query.command) ?? { error: 'journal-unavailable' }; }
+      catch { result = { error: 'journal-unavailable' }; }
+      try { this.child.postMessage({ fileJournalResult: { id: query.id, ...result } }); } catch { /* Durable record remains authoritative. */ }
+      return;
+    }
+    if ('runtimeResourceRequest' in message) {
+      const query = message.runtimeResourceRequest; let error: string | undefined;
+      try { if (!this.runtimeResource) throw new Error(); this.runtimeResource(query.record); } catch { error = 'journal-unavailable'; }
+      try { this.child.postMessage({ runtimeResourceResult: { id: query.id, error } }); } catch { /* Do not replay a lost ACK. */ }
+      return;
+    }
     if ('budgetRequest' in message) {
       const query = message.budgetRequest;
       let result: import('@cloudhelm/contracts').BudgetOutcome;

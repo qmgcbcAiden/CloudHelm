@@ -4,6 +4,7 @@ import { SshTransport } from '@cloudhelm/adapters';
 import { operationFingerprint, type ProposedOperation } from '@cloudhelm/core';
 import type { RuntimeHost } from '@cloudhelm/contracts/runtime';
 import { PrivilegedRuntime } from '../../../apps/desktop/src/worker/privileged-runtime.js';
+import type { NativeRuntimePreparation } from '../../../apps/desktop/src/worker/native-runtime-preparation.js';
 
 const state = vi.hoisted(() => ({ commands: [] as string[], connections: [] as unknown[][], uid: '0', fail: false, gen: 1,
   su: 0, passwords: [] as string[], close: vi.fn() }));
@@ -15,6 +16,7 @@ vi.mock('@cloudhelm/adapters', async (importOriginal) => ({
     close() { state.close(); }
   },
   SshCommandTerminal: class {
+    readonly agent = this;
     data = (_value: string) => {}; exit = (_code: number) => {};
     onData(callback: typeof this.data) { this.data = callback; }
     onExit(callback: typeof this.exit) { this.exit = callback; }
@@ -40,7 +42,13 @@ function setup(mode: 'ssh' | 'su' | 'sudo' = 'ssh') {
   const terminal = new TerminalManager({ data() {}, state() {} });
   const input = vi.fn(async (request: { kind: string }): Promise<string | null> => request.kind === 'confirmation' ? mode === 'sudo' ? '使用 sudo（推荐）' : mode === 'ssh' ? 'SSH 登录 root' : '通过 su 切换 root' : 'root-secret');
   const ordinary = { execute: vi.fn() };
-  const runtime = new PrivilegedRuntime({ terminal, ssh: new SshTransport(), ordinary, jump: () => undefined, input });
+  const commands = { execute: vi.fn(terminal.execute.bind(terminal)) };
+  const native = { ensure: vi.fn(async () => ({ directory: '/tmp/runtime', executable: '/tmp/runtime/helper',
+    artifact: { protocolVersion: 1, platform: 'linux', arch: 'amd64', sha256: 'a'.repeat(64), size: 1 } })),
+    bootstrap: vi.fn(async (_operation, _plan, _gate, _transport, run: (current: () => void) => Promise<void>) => run(() => {})), retireSession: () => false };
+  const runtime = new PrivilegedRuntime({ terminal, ssh: new SshTransport(), ordinary, commands,
+    runtime: native as unknown as NativeRuntimePreparation, files: () => { throw new Error('No file operation allowed in fixture'); },
+    jump: () => undefined, input });
   const access = runtime.forTask('task');
   const decisions: string[] = [];
   const gate = new SafetyGate({ analyzer: { analyze: async (command) => ({ raw: command, calls: [{ name: command.split(' ')[0]!, args: command.split(' ').slice(1), dynamic: false, redirects: false }],
@@ -55,7 +63,7 @@ function setup(mode: 'ssh' | 'su' | 'sudo' = 'ssh') {
       terminalId, terminalGeneration: terminal.currentGeneration(terminalId), policyRevision: 1, protectedPaths: host.protectedPaths,
       allowedWorkingRoots: ['/'], goal: 'demo', ...access.scope(terminalId) } };
   };
-  return { runtime, access, gate, request, operation, input, ordinary, terminal, decisions };
+  return { runtime, access, gate, request, operation, input, ordinary, commands, native, terminal, decisions };
 }
 
 describe('confirmed isolated root sessions', () => {
@@ -86,7 +94,7 @@ describe('confirmed isolated root sessions', () => {
       await expect(f.access.prepare!(f.operation(context.sessionId, command))).rejects.toThrow();
     const base = f.operation(context.sessionId, 'id');
     const write: ProposedOperation = { id: 'file', kind: 'write-file', path: '/opt/demo/file', content: 'x', scope: base.scope };
-    await expect(f.access.prepare!(write)).rejects.toThrow('do not elevate SFTP');
+    await expect(f.access.prepare!(write)).rejects.toThrow('Structured file transactions require');
     const result = await f.gate.execute(write);
     expect(result.result).toMatchObject({ status: 'failed', effects: 'none', failureKind: 'unsupported' });
     expect(f.ordinary.execute).not.toHaveBeenCalled(); f.access.close();
@@ -116,6 +124,9 @@ describe('confirmed isolated root sessions', () => {
     expect((await f.gate.execute(operation)).result?.status).toBe('succeeded');
     expect((await f.gate.execute(f.operation(session.sessionId, 'cat /etc/shadow'))).decision.verdict).toBe('deny');
     expect(state.commands).toEqual(['id -u', 'mkdir -p /opt/demo']);
+    expect(f.commands.execute).toHaveBeenCalledTimes(2);
+    expect(f.native.ensure).toHaveBeenCalledOnce();
+    expect(f.native.bootstrap).toHaveBeenCalledTimes(mode === 'su' ? 1 : 0);
     expect(f.ordinary.execute).not.toHaveBeenCalled();
     if (mode === 'ssh') {
       expect(state.connections[0]?.[0]).toMatchObject({ username: 'root', id: host.id, fingerprint: 'trusted', address: host.address, secret: undefined });
@@ -125,7 +136,7 @@ describe('confirmed isolated root sessions', () => {
   });
   it.each(['ssh', 'su'] as const)('does not execute payload after failed %s authentication', async (mode) => {
     const f = setup(mode); state.fail = true;
-    await expect(f.request()).rejects.toThrow('identity'); expect(state.commands).toEqual([]);
+    await expect(f.request()).rejects.toThrow(mode === 'su' ? 'su failed' : 'identity'); expect(state.commands).toEqual([]);
   });
   it('rejects a non-root identity', async () => {
     const f = setup(); state.uid = '1000'; await expect(f.request()).rejects.toThrow('identity');
