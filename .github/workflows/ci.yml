@@ -25,7 +25,7 @@ jobs:
       matrix:
         include:
           # Standard hosted runner labels, verified against actions/runner-images.
-          - os: macos-15
+          - os: macos-26
             platform: macos-arm64
             arch: arm64
             builder_args: --mac dmg --arm64

@@ -164,7 +164,7 @@ pnpm --filter @cloudhelm/desktop exec electron-builder --win nsis --x64 --publis
 
 | 构建目标 | 原生 runner | 安装包 Artifact |
 | --- | --- | --- |
-| macOS arm64 | `macos-15` | `CloudHelm-macos-arm64` |
+| macOS arm64 | `macos-26` | `CloudHelm-macos-arm64` |
 | macOS x64 | `macos-15-intel` | `CloudHelm-macos-x64` |
 | Windows x64 | `windows-2022` | `CloudHelm-windows-x64` |
 
