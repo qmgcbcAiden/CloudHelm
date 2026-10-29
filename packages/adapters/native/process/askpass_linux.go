@@ -109,7 +109,10 @@ func (a *authServer) authenticate(connection *net.UnixConn) {
 		return r
 	}, hello.Prompt)
 	promptDigest := sha256.Sum256([]byte(hello.Prompt))
-	_ = a.w.Emit("auth", map[string]any{"id": id, "prompt": prompt, "promptSha256": hex.EncodeToString(promptDigest[:]), "mechanism": "sudo", "kind": "unknown"})
+	if a.w.Emit("auth", map[string]any{"id": id, "prompt": prompt, "promptSha256": hex.EncodeToString(promptDigest[:]), "mechanism": "sudo", "kind": "unknown"}) != nil {
+		a.Close()
+		return
+	}
 	var value *string
 	select {
 	case value = <-answer:
@@ -117,7 +120,10 @@ func (a *authServer) authenticate(connection *net.UnixConn) {
 	}
 	// Close the prior challenge before sudo can ask the next PAM question.
 	// Otherwise concurrent askpass clients may reorder auth-close/auth frames.
-	_ = a.w.Emit("auth-close", map[string]any{"id": id})
+	if a.w.Emit("auth-close", map[string]any{"id": id}) != nil {
+		a.Close()
+		return
+	}
 	a.mu.Lock()
 	if a.waiting == id {
 		a.waiting = ""

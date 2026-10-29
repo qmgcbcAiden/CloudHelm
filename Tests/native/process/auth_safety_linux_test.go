@@ -95,22 +95,52 @@ func TestRealMultiStagePAMChallenge(t *testing.T) {
 	if os.Getenv("CLOUDHELM_NATIVE_MFA") != "1" {
 		return
 	}
-	p := start(t, "--serve")
-	p.launch([]string{"/usr/bin/sudo", "-A", "--", "/usr/bin/printf", "allowed"}, true, "/tmp")
-	password := p.wait("auth")
-	p.send("answer", wire{"id": password["id"], "answer": "fixture-login-password"})
-	otp := p.wait("auth")
-	if password["id"] == otp["id"] || password["prompt"] == otp["prompt"] {
-		t.Fatal("PAM conversation did not create separate challenges")
-	}
-	code := totp()
-	p.send("answer", wire{"id": otp["id"], "answer": code})
-	exit := p.wait("exit")["code"]
-	if strings.Contains(p.output(), "fixture-login-password") || strings.Contains(p.output(), code) {
-		t.Fatal("PAM secret reached business output")
-	}
-	if exit != float64(0) || !strings.HasSuffix(p.output(), "allowed") {
-		t.Fatalf("real PAM password+TOTP failed: exit=%v", exit)
+	for round := 0; round < 3; round++ {
+		t.Run(fmt.Sprintf("conversation-%d", round), func(t *testing.T) {
+			p := start(t, "--serve")
+			p.launch([]string{"/usr/bin/sudo", "-A", "--", "/usr/bin/printf", "allowed"}, true, "/tmp")
+			password := p.wait("auth")
+			p.send("answer", wire{"id": password["id"], "answer": "fixture-login-password"})
+			otp := p.wait("auth")
+			if password["id"] == otp["id"] || password["prompt"] == otp["prompt"] {
+				t.Fatal("PAM conversation did not create separate challenges")
+			}
+			code := totp()
+			p.send("answer", wire{"id": otp["id"], "answer": code})
+			exit := p.wait("exit")["code"]
+			if strings.Contains(p.output(), "fixture-login-password") || strings.Contains(p.output(), code) {
+				t.Fatal("PAM secret reached business output")
+			}
+			if exit != float64(0) || !strings.HasSuffix(p.output(), "allowed") {
+				t.Fatalf("real PAM password+TOTP failed: exit=%v", exit)
+			}
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			waiting := ""
+			challenges := 0
+			for _, event := range p.all {
+				switch event["type"] {
+				case "auth":
+					if waiting != "" {
+						t.Fatal("next real PAM challenge overtook prior auth-close")
+					}
+					waiting, _ = event["id"].(string)
+					challenges++
+				case "auth-close":
+					if event["id"] != waiting {
+						t.Fatal("real PAM auth-close was duplicated or reordered")
+					}
+					waiting = ""
+				case "exit":
+					if waiting != "" {
+						t.Fatal("PAM completion overtook auth-close")
+					}
+				}
+			}
+			if challenges != 2 || waiting != "" {
+				t.Fatal("expected two complete real PAM challenge lifecycles")
+			}
+		})
 	}
 }
 
