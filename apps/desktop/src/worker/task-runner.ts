@@ -400,6 +400,7 @@ export class TaskRunner {
     hostLabel: string, manualReview = false) {
     this.assertRemoteActive();
     operation = await this.privileged?.prepare?.(operation) ?? operation;
+    const legacyIntentKey = operationIntentKey(operation);
     const analysis = operation.kind === 'command' ? await this.analyzer.analyze(operation.command).catch(() => undefined) : undefined;
     // Refuse sudo capability probes before review: they deserve no approval card and no pause.
     if (analysis && isSudoStatusProbe(analysis)) return blockedOperationFeedback(operation.id, 'unsupported-probe',
@@ -413,14 +414,14 @@ export class TaskRunner {
       try { bindCommandExecutionPlan(operation, analysis); }
       catch { return blockedOperationFeedback(operation.id, 'unsupported-authentication-form', 'No command sent; the authentication form cannot be represented by a bounded reviewed execution plan.'); }
     }
-    // Lookup and audit must use the same finalized identities, including compound sudo targets.
+    // Final identities match new audit records; the prior key retains v11 compound sudo replay barriers.
     if (!analysis || !isReadOnlyQuery(analysis)) {
       const key = operationIntentKey(operation);
       const denied = !manualReview && this.operationViews().find((item) =>
-        item.intentKey === key && item.status === 'denied' && item.ruleId === 'ai-review-deny');
+        (item.intentKey === key || item.intentKey === legacyIntentKey) && item.status === 'denied' && item.ruleId === 'ai-review-deny');
       if (denied) return blockedOperationFeedback(operation.id, 'prior-review-denied',
         `Not executed; effects: none. Independent AI review already denied the same operation (${denied.id}). Do not retry it under a new ID or wrapper. Propose a substantively safer action or let the user request exact manual review.`, denied.id);
-      const previous = this.operationViews().find((item) => item.intentKey === key
+      const previous = this.operationViews().find((item) => (item.intentKey === key || item.intentKey === legacyIntentKey)
         && (['running', 'proposed', 'approved', 'unknown'].includes(item.status) || (item.status === 'succeeded' && this.replayProtected.has(item.id))));
       if (previous) return blockedOperationFeedback(operation.id, 'replay-protected', `Not executed: operation ${previous.id} already records this action (${previous.status}). Read its log and inspect the actual result; do not replay it. A new operation ID does not make a retry safe.`, previous.id);
     }

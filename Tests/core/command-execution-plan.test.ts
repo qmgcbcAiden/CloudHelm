@@ -5,6 +5,7 @@ import { buildCommandExecutionPlan, commandExecutionIdentities } from '../../pac
 import { sanitizeAuthenticationPrompt } from '../../packages/core/src/authentication-prompt.js';
 import { isPrivateInputAnswer as coreAnswer } from '../../packages/core/src/remote-runtime.js';
 import { isPrivateInputAnswer as contractAnswer } from '../../packages/contracts/src/private-input.js';
+import { fixtureBash } from '../bash-fixture.js';
 
 const analyzer = new BashAnalyzer();
 describe('reviewed final command launch plans', () => {
@@ -14,7 +15,8 @@ describe('reviewed final command launch plans', () => {
     const [step] = plan.steps;
     expect(plan.steps).toHaveLength(1);
     expect(step).toMatchObject({ runAs: 'deploy', authentication: 'none' });
-    expect(execFileSync(step!.argv[0]!, step!.argv.slice(1), { encoding: 'utf8' })).toBe('HELLO\n');
+    expect(step!.argv[0]).toBe('/bin/bash');
+    expect(execFileSync(fixtureBash(), step!.argv.slice(1), { encoding: 'utf8' })).toBe('HELLO\n');
   });
   it('binds actual mixed identities and final sudo arguments before approval', async () => {
     const plan = buildCommandExecutionPlan(await analyzer.analyze("sudo id && printf '%s\\n' '$HOME'; /usr/bin/sudo -u postgres -- id"), 'deploy');
@@ -23,7 +25,8 @@ describe('reviewed final command launch plans', () => {
     expect(plan.steps[2]).toMatchObject({ argv: ['/usr/bin/sudo', '-A', '-u', 'postgres', '--', 'id'], runAs: 'postgres' });
     const ordinary = plan.steps[1]!;
     expect(ordinary.condition).toBe('success');
-    expect(execFileSync(ordinary.argv[0]!, ordinary.argv.slice(1), { encoding: 'utf8' })).toBe('$HOME\n');
+    expect(ordinary.argv[0]).toBe('/bin/bash');
+    expect(execFileSync(fixtureBash(), ordinary.argv.slice(1), { encoding: 'utf8' })).toBe('$HOME\n');
   });
   it.each(['sudo cat /etc/shadow | head', 'sudo echo "$HOME"', 'sudo sh -c "id"; su root', 'sudo -S id', 'su root', 'sudo id > /tmp/result'])(
     'rejects unsupported authentication form before dispatch: %s', async (command) => {
