@@ -120,7 +120,7 @@ export class OperationInputBridge implements OperationExecutor {
       const details: Omit<InputRequest, 'id' | 'expiresAt'> = {
         taskId, operationId: operation.id, hostId, terminalId, terminalGeneration, connectionGeneration,
         kind: challenge.kind === 'otp' ? 'otp' : 'secret', recipient: 'sudo',
-        prompt: `sudo 认证信息（本进程第 ${processAttempts}/${maxAttempts} 次请求）`, allowPasswordCache,
+        prompt: `sudo 认证挑战（本进程第 ${processAttempts}/${maxAttempts} 次请求）`, allowPasswordCache,
         reason: `为了完成“${goal}”，本次已审核的 sudo 进程请求认证。服务器提示：${prompt.slice(0, 300) || '未提供提示'}。`
           + '再次请求可能是多因素认证，不自动等于密码错误。回答仅交给当前认证进程，不进入命令输入、AI 上下文或日志。'
           + (allowPasswordCache ? '只有勾选“这是可复用密码”且本次仅有一次认证请求并成功，才会在任务内存中缓存最多 5 分钟；提示变化、多次请求、失败、暂停或断线即清除。' : '本次回答不会缓存。')

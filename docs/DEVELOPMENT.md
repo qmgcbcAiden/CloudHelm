@@ -168,7 +168,7 @@ pnpm --filter @cloudhelm/desktop exec electron-builder --win nsis --x64 --publis
 | macOS x64 | `macos-15-intel` | `CloudHelm-macos-x64` |
 | Windows x64 | `windows-2022` | `CloudHelm-windows-x64` |
 
-每个平台依次完成锁文件安装、`pnpm check`、UI/Markdown 测试、目录包构建、编译后与打包后 Electron 测试，再生成 DMG／NSIS。三个平台独立运行；同一源分支的新运行会取消旧运行。`smoke-平台名` 保存截图，安装包和截图保留 7 天。
+每个平台依次完成锁文件安装、`pnpm check`、UI/Markdown/私密文件预览测试、目录包构建、编译后与打包后 Electron 测试，再生成 DMG／NSIS。三个平台独立运行；同一源分支的新运行会取消旧运行。`smoke-平台名` 保存截图，安装包和截图保留 7 天。
 
 工作流仅请求仓库内容只读权限，不需要模型 Key、生产 SSH 凭据或发布 Token。Fork PR 的工作流可能需要维护者批准；手动运行入口需要工作流已存在于默认分支。状态以对应提交的 Checks 为准，不用历史绿色结果代替新提交结果。
 
@@ -188,3 +188,5 @@ pnpm --filter @cloudhelm/desktop exec electron-builder --win nsis --x64 --publis
 `pnpm build:native` 使用固定 Go 版本及 `CGO_ENABLED=0` 构建两种 Linux ELF，生成 SHA-256 清单。`CLOUDHELM_GO` 可指定固定工具链路径；不接受静默使用不同版本。`verify-native-helper.mjs` 检查 ELF 架构、程序头、无动态解释器/依赖及工件摘要；三种桌面包的真实 Electron 冒烟都检查随包的两种工件。
 
 `.github/workflows/native-linux.yml` 使用专用隔离账户、合成凭据、临时 sshd 和 PAM，执行 amd64/arm64 × glibc/musl。`Tests/native/` 的测试通过真实 SSH 字节流驱动组件。跳过不算通过；SELinux 使用专用 enforcing 环境，普通容器无法代替该证据。当前修复轮的运行结果记录在 [TOOLS_REPAIR_STATUS.md](TOOLS_REPAIR_STATUS.md)。
+
+`pnpm test:file-preview` 使用真实浏览器、实际 Main 预览存储和审批 IPC，验证行差异、完整展开、过期清除、绕过 Renderer 后仍拒绝过期批准；SSH 和模型不参与此 UI 测试。原生 Linux workflow 另有 `adapters` 作业，对空白临时 sshd 执行实际 TypeScript 流式部署、文件提交、sudo/su 和清理，必须实际运行两个 opt-in 集成测试。桌面机器上的 Git Bash 仅用于 Windows shell 测试夹具，产品发送的远端计划仍固定为 Linux Bash；Linux 运行语义以真实 SSH 矩阵为准。
