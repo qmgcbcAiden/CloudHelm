@@ -1,3 +1,4 @@
+import { verifyElf, verifyNativeBundle } from './verify-native-helper.mjs';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -22,8 +23,10 @@ for (const arch of ['amd64', 'arm64']) {
     cwd: root, stdio: 'inherit', env: { ...process.env, GOTOOLCHAIN: 'local', GOOS: 'linux', GOARCH: arch, CGO_ENABLED: '0' }
   });
   const data = await readFile(target);
-  if (data.subarray(0, 4).toString('hex') !== '7f454c46') throw new Error('Native helper is not an ELF executable');
+  verifyElf(data, arch);
   artifacts.push({ platform: 'linux', arch, filename, size: data.length,
     sha256: createHash('sha256').update(data).digest('hex'), protocolVersion: 1 });
 }
 await writeFile(path.join(destination, 'manifest.json'), JSON.stringify({ protocolVersion: 1, toolchain: 'go1.27.3', artifacts }, null, 2) + '\n');
+
+await verifyNativeBundle(destination);

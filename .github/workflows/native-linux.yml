@@ -62,7 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           docker build -f "Tests/native/fixture/Dockerfile.$FIXTURE_LIBC" -t cloudhelm-native-fixture .cache/native-fixture
-          docker run --rm --tmpfs /noexec:rw,noexec,nosuid,mode=1777 cloudhelm-native-fixture 2>&1 | tee .cache/native-fixture/results.log
+          docker run --rm --tmpfs /noexec:rw,noexec,nosuid,mode=1777 --tmpfs /readonly:ro,mode=755 cloudhelm-native-fixture 2>&1 | tee .cache/native-fixture/results.log
           if grep -q -- '--- SKIP:' .cache/native-fixture/results.log; then
             echo 'Native fixture coverage must not silently skip'; exit 1
           fi

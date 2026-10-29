@@ -55,3 +55,16 @@ done
 su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=180s'
 su -s /bin/sh cloudhelm -c '/fixture/files.test -test.v -test.timeout=60s'
 /fixture/files.test -test.v -test.timeout=60s
+
+# Run the real distribution PAM password module followed by a real TOTP module.
+# No fake conversation callback is substituted for either authentication stage.
+printf '%s\n' 'JBSWY3DPEHPK3PXP' '" TOTP_AUTH' '" WINDOW_SIZE 3' > /home/cloudhelm/.google_authenticator
+chown cloudhelm:cloudhelm /home/cloudhelm/.google_authenticator
+chmod 600 /home/cloudhelm/.google_authenticator
+printf '\nauth required pam_google_authenticator.so\n' >> /etc/pam.d/sudo
+su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_MFA=1 CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=60s -test.run=^TestRealMultiStagePAMChallenge$'
+
+# OpenSSH still has a valid /bin/sh login shell when Bash is deliberately absent.
+sed -i 's|/bin/bash$|/bin/sh|' /etc/passwd
+mv /bin/bash /bin/bash.fixture-disabled
+su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_NO_BASH=1 CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=30s -test.run=^TestNoBashRejectsBeforePayload$'

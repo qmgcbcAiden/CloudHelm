@@ -311,6 +311,23 @@ func cleanup(req Request) Result {
 	if m.Stage != "confirmed" || m.Receipt == nil {
 		return failure(errUnsupported, false)
 	}
+	duplicate, err := unix.Dup(dir)
+	if err != nil {
+		return failure(err, false)
+	}
+	listing := os.NewFile(uintptr(duplicate), "transaction-directory")
+	entries, listErr := listing.Readdirnames(16)
+	listing.Close()
+	if listErr != nil && listErr != io.EOF {
+		return failure(listErr, false)
+	}
+	allowed := map[string]bool{"backup": true, "new": true, "manifest.next": true, "manifest.json": true, "lock": true}
+	for _, entry := range entries {
+		var st unix.Stat_t
+		if !allowed[entry] || unix.Fstatat(dir, entry, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) {
+			return failure(errUnsupported, false)
+		}
+	}
 	// Never recurse into a path discovered from untrusted filesystem contents.
 	for _, name := range []string{"backup", "new", "manifest.next", "manifest.json", "lock"} {
 		if err = unix.Unlinkat(dir, name, 0); err != nil && !errors.Is(err, unix.ENOENT) {

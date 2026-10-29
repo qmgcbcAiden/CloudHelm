@@ -7,12 +7,16 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -120,7 +124,7 @@ func TestAttributeValuesNeverEnterManifest(t *testing.T) {
 	os.WriteFile(path, []byte("old"), 0600)
 	secret := []byte("private-xattr-value")
 	if err := unix.Setxattr(path, "user.private", secret, 0); err != nil {
-		t.Skipf("xattrs unavailable: %v", err)
+		t.Fatalf("fixture filesystem must support xattrs: %v", err)
 	}
 	p := plan(t, path, "new")
 	if p.Before.Metadata.Xattrs["user.private"] != hash(string(secret)) {
@@ -257,5 +261,127 @@ func TestParentReplacementAfterStagingCannotRedirectCommit(t *testing.T) {
 	current, _ := os.ReadFile(path)
 	if string(original) != "old" || string(current) != "other" {
 		t.Fatal("changed a moved or substituted directory")
+	}
+}
+
+func sendCommit(write *io.PipeWriter) {
+	commit := protocol.Request{Binding: protocol.Binding{Version: 1, SessionID: "session", OperationID: "operation", Generation: 1}, Type: "file-commit"}
+	raw, _ := json.Marshal(commit)
+	go func() { write.Write(append(raw, '\n')); write.Close() }()
+}
+func TestMissingStagedPayloadCannotTruncateOriginal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(path, []byte("old"), 0600)
+	req := request(plan(t, path, "new"), "new")
+	write, scanner, done := staged(t, req)
+	if err := os.Remove(filepath.Join(filepath.Dir(path), ".cloudhelm-txn-txn-1", "new")); err != nil {
+		t.Fatal(err)
+	}
+	sendCommit(write)
+	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"status":"unknown"`) {
+		t.Fatalf("missing payload not reported: %s", scanner.Text())
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "old" {
+		t.Fatal("truncated target despite staging failure")
+	}
+}
+func TestCommitReceiptDiskFailure(t *testing.T) {
+	command := exec.Command(os.Args[0], "-test.run=^TestFileDiskFaultChild$", "-test.v")
+	command.Env = append(os.Environ(), "CLOUDHELM_FILE_FAULT_CHILD=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("file fault fixture failed: %v\n%s", err, output)
+	}
+}
+
+// A separate test process scopes RLIMIT_FSIZE and SIGXFSZ to this fixture. There
+// are no production fault switches and no privileged mounts or global changes.
+func TestFileDiskFaultChild(t *testing.T) {
+	if os.Getenv("CLOUDHELM_FILE_FAULT_CHILD") != "1" {
+		return
+	}
+	path := filepath.Join(t.TempDir(), "file")
+	os.WriteFile(path, []byte("old"), 0600)
+	req := request(plan(t, path, "new"), "new")
+	write, scanner, done := staged(t, req)
+	var previous unix.Rlimit
+	if err := unix.Getrlimit(unix.RLIMIT_FSIZE, &previous); err != nil {
+		t.Fatal(err)
+	}
+	signal.Ignore(syscall.SIGXFSZ)
+	if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &unix.Rlimit{Cur: 0, Max: previous.Max}); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Setrlimit(unix.RLIMIT_FSIZE, &previous)
+	sendCommit(write)
+	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"status":"unknown"`) {
+		t.Fatalf("receipt write failure was not unknown: %s", scanner.Text())
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Setrlimit(unix.RLIMIT_FSIZE, &previous); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "new" {
+		t.Fatalf("fixture did not reach commit: %q", data)
+	}
+	recovered := files.Handle("recover", req)
+	if recovered.Status != "unknown" || recovered.Code != "matches-without-receipt" || recovered.Receipt != nil {
+		t.Fatalf("manufactured receipt: %+v", recovered)
+	}
+}
+func TestAccessACLPreservedByDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	acl := make([]byte, 44)
+	binary.LittleEndian.PutUint32(acl, 2)
+	entries := [][3]uint32{{1, 6, 0xffffffff}, {2, 4, 12345}, {4, 4, 0xffffffff}, {16, 4, 0xffffffff}, {32, 0, 0xffffffff}}
+	for i, entry := range entries {
+		offset := 4 + i*8
+		binary.LittleEndian.PutUint16(acl[offset:], uint16(entry[0]))
+		binary.LittleEndian.PutUint16(acl[offset+2:], uint16(entry[1]))
+		binary.LittleEndian.PutUint32(acl[offset+4:], entry[2])
+	}
+	if err := unix.Setxattr(path, "system.posix_acl_access", acl, 0); err != nil {
+		t.Fatalf("fixture filesystem must support access ACLs: %v", err)
+	}
+	p := plan(t, path, "new")
+	if p.Before.Metadata.Xattrs["system.posix_acl_access"] != hash(string(acl)) {
+		t.Fatal("ACL digest not bound")
+	}
+	r := files.Handle("apply", request(p, "new"))
+	if r.Status != "succeeded" {
+		t.Fatalf("ACL replace: %+v", r)
+	}
+	actual := make([]byte, 100)
+	n, err := unix.Getxattr(path, "system.posix_acl_access", actual)
+	if err != nil || !bytes.Equal(actual[:n], acl) {
+		t.Fatalf("ACL lost: %v", err)
+	}
+}
+
+func TestCleanupRefusesUnrecognizedObjectsWithoutDeletingReceipt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	req := request(plan(t, path, "new"), "new")
+	r := files.Handle("apply", req)
+	if r.Status != "succeeded" {
+		t.Fatalf("%+v", r)
+	}
+	if err := os.WriteFile(filepath.Join(r.Directory, "unowned"), []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	result := files.Handle("cleanup", req)
+	if result.Code != "unsupported" || result.Effects != "none" {
+		t.Fatalf("unexpected cleanup: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(r.Directory, "manifest.json")); err != nil {
+		t.Fatal("cleanup removed receipt before validating directory")
 	}
 }

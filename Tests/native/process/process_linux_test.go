@@ -123,7 +123,11 @@ func (p *process) send(kind string, fields wire) {
 func (p *process) wait(kind string) wire {
 	p.t.Helper()
 	for {
-		if e := p.next(); e["type"] == kind {
+		e := p.next()
+		if e["type"] == "error" && kind != "error" {
+			p.t.Fatalf("native error waiting for %s: code=%v bootstrapExit=%v", kind, e["code"], e["bootstrapExit"])
+		}
+		if e["type"] == kind {
 			return e
 		}
 	}
@@ -225,8 +229,9 @@ func TestRealSudoExactCommandAndPassword(t *testing.T) {
 	p.launch([]string{"/usr/bin/sudo", "-A", "--", "/usr/bin/printf", "allowed"}, true, "/tmp")
 	auth := p.wait("auth")
 	p.send("answer", wire{"id": auth["id"], "answer": "fixture-login-password"})
-	if p.wait("exit")["code"] != float64(0) || p.output() != "allowed" {
-		t.Fatal("exact sudoers command did not execute")
+	exit := p.wait("exit")["code"]
+	if exit != float64(0) || p.output() != "allowed" {
+		t.Fatalf("exact sudoers command result: exit=%v output=%q", exit, strings.ReplaceAll(p.output(), "fixture-login-password", "<redacted>"))
 	}
 	if strings.Contains(p.output(), "fixture-login-password") {
 		t.Fatal("credential reached output")
@@ -344,6 +349,15 @@ func TestRealSuRootPeerAndIndependentPayload(t *testing.T) {
 		t.Fatalf("root isolation result incorrect: %q", output.String())
 	}
 	p.send("end", nil)
+	content, err := os.ReadFile(helper(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.send("cleanup", wire{"rootDirectory": directory, "sha256": digest(content)})
+	p.wait("cleanup-confirmed")
+	if _, err = os.Stat(directory); !os.IsNotExist(err) {
+		t.Fatal("approved cleanup did not remove root directory")
+	}
 	_ = p.input.Close()
 }
 func TestSuRejectsWrongPasswordAndCorruptArtifact(t *testing.T) {

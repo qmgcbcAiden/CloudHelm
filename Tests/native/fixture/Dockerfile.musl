@@ -1,5 +1,5 @@
 FROM alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412
-RUN apk add --no-cache openssh-server-pam openssh-client sudo bash coreutils util-linux-login linux-pam \
+RUN apk add --no-cache openssh-server-pam openssh-client sudo bash coreutils util-linux-login linux-pam google-authenticator \
     && adduser -D -s /bin/bash cloudhelm
 COPY helper process.test files.test entrypoint.sh /fixture/
 ENTRYPOINT ["/bin/sh", "/fixture/entrypoint.sh"]

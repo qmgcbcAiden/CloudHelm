@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/privilege"
 	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/protocol"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -27,11 +28,13 @@ type connectPayload struct {
 }
 type frame struct {
 	protocol.Binding
-	Type   string  `json:"type"`
-	ID     string  `json:"id,omitempty"`
-	Answer *string `json:"answer,omitempty"`
-	Data   string  `json:"data,omitempty"`
-	Mode   string  `json:"mode,omitempty"`
+	Type      string  `json:"type"`
+	ID        string  `json:"id,omitempty"`
+	Answer    *string `json:"answer,omitempty"`
+	Data      string  `json:"data,omitempty"`
+	Mode      string  `json:"mode,omitempty"`
+	Directory string  `json:"rootDirectory,omitempty"`
+	SHA256    string  `json:"sha256,omitempty"`
 }
 
 func id() string {
@@ -70,10 +73,9 @@ while :; do
  p=${p%/*}; [ -n "$p" ] || p=/
 done
 mkdir -- ` + quote(directory) + `
-trap ` + quote("rm -f -- "+quote(target)+"; rmdir -- "+quote(directory)) + ` EXIT
-cp -- ` + quote(fmt.Sprintf("/proc/%d/exe", pid)) + ` ` + quote(target) + `
-chmod 700 -- ` + quote(target) + `
-printf '%s\n' ` + quote(digest+"  "+target) + ` | sha256sum -c - >/dev/null
+cp -- ` + quote(fmt.Sprintf("/proc/%d/exe", pid)) + ` ` + quote(target) + ` || exit 72
+chmod 700 -- ` + quote(target) + ` || exit 73
+printf '%s\n' ` + quote(digest+"  "+target) + ` | sha256sum -c - >/dev/null || exit 74
 ` + quote(target) + ` --su-root ` + quote(socket) + ` ` + quote(token) + ` ` + quote(digest) + ` ` + quote(directory)
 	return script, nil
 }
@@ -120,6 +122,11 @@ func Run(in io.Reader, out io.Writer) error {
 	defer master.Close()
 	defer slave.Close()
 	cmd := exec.Command(suPath, "-s", "/bin/sh", "root", "-c", command)
+	trusted, trustedErr := privilege.Bind(cmd, suPath)
+	if trustedErr != nil {
+		return fail("unsupported")
+	}
+	defer trusted.Close()
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL=C", "TERM=dumb"}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}
@@ -133,7 +140,17 @@ func Run(in io.Reader, out io.Writer) error {
 		}
 	}()
 	processDone := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(processDone) }()
+	processCode := 0
+	go func() {
+		if e := cmd.Wait(); e != nil {
+			if status, ok := e.(*exec.ExitError); ok {
+				processCode = status.ExitCode()
+			} else {
+				processCode = -1
+			}
+		}
+		close(processDone)
+	}()
 	controls := make(chan frame)
 	controlDone := make(chan struct{})
 	done := make(chan struct{})
@@ -202,7 +219,8 @@ func Run(in io.Reader, out io.Writer) error {
 		case <-controlDone:
 			return fail("cancelled")
 		case <-processDone:
-			return fail("authentication-unconfirmed")
+			_ = w.Emit("error", map[string]any{"code": "authentication-unconfirmed", "bootstrapExit": processCode})
+			return errors.New("authentication-unconfirmed")
 		case chunk := <-prompts:
 			prompt = append(prompt, chunk...)
 			if len(prompt) > 4096 {
@@ -258,7 +276,7 @@ func Run(in io.Reader, out io.Writer) error {
 	}
 	_ = w.Emit("ready", map[string]any{"uid": 0, "euid": 0, "rootDirectory": payload.RootDirectory})
 	// No more authentication-PTY reads or writes occur after root identity is proved.
-	return relay(peer, controls, controlDone, done, w, req.Binding)
+	return relay(peer, controls, controlDone, done, w, payload.RootDirectory, payload.SHA256)
 }
 
 func peerUID(c *net.UnixConn, uid uint32) bool {
@@ -273,7 +291,7 @@ func peerUID(c *net.UnixConn, uid uint32) bool {
 	})
 	return valid
 }
-func relay(peer *net.UnixConn, controls <-chan frame, controlDone <-chan struct{}, done <-chan struct{}, w *protocol.Writer, b protocol.Binding) error {
+func relay(peer *net.UnixConn, controls <-chan frame, controlDone <-chan struct{}, done <-chan struct{}, w *protocol.Writer, directory, digest string) error {
 	output := make(chan json.RawMessage)
 	closed := make(chan struct{})
 	go func() {
@@ -291,6 +309,7 @@ func relay(peer *net.UnixConn, controls <-chan frame, controlDone <-chan struct{
 			}
 		}
 	}()
+	cleaning := false
 	for {
 		select {
 		case <-controlDone:
@@ -298,12 +317,29 @@ func relay(peer *net.UnixConn, controls <-chan frame, controlDone <-chan struct{
 		case <-closed:
 			return errors.New("root-closed")
 		case value := <-output:
+			var event struct {
+				Type      string `json:"type"`
+				Directory string `json:"rootDirectory"`
+				SHA256    string `json:"sha256"`
+			}
+			if json.Unmarshal(value, &event) == nil && event.Type == "cleanup-confirmed" {
+				if !cleaning || event.Directory != directory || event.SHA256 != digest {
+					return errors.New("invalid-cleanup")
+				}
+				return w.Emit("cleanup-confirmed", map[string]any{"rootDirectory": directory, "sha256": digest})
+			}
 			if w.Emit("output", map[string]any{"data": string(value) + "\n"}) != nil {
 				return errors.New("controller-closed")
 			}
 		case m := <-controls:
-			if m.Type != "start" && m.Type != "control" && m.Type != "end" {
+			if cleaning || (m.Type != "start" && m.Type != "control" && m.Type != "end" && m.Type != "cleanup") {
 				return errors.New("invalid-control")
+			}
+			if m.Type == "cleanup" {
+				if m.Directory != directory || m.SHA256 != digest {
+					return errors.New("invalid-cleanup")
+				}
+				cleaning = true
 			}
 			if json.NewEncoder(peer).Encode(m) != nil {
 				return errors.New("root-closed")

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/privilege"
 	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/protocol"
 	"github.com/creack/pty"
 	"golang.org/x/sys/unix"
@@ -72,10 +73,16 @@ func Run(in io.Reader, out io.Writer) error {
 		return errors.New("invalid-window")
 	}
 	cmd := exec.Command(executable, launch.Argv[1:]...)
+	cmd.Args = append([]string(nil), launch.Argv...)
 	cmd.Dir = launch.Cwd
 	cmd.Env = environment()
 	var auth *authServer
 	if launch.Sudo {
+		trusted, trustedErr := privilege.Bind(cmd, executable)
+		if trustedErr != nil {
+			return w.Emit("launch-error", map[string]any{"kind": "unsupported", "code": "sudo-executable-untrusted"})
+		}
+		defer trusted.Close()
 		auth, err = newAuthServer(w)
 		if err != nil {
 			return launchError(w, false, err)
@@ -101,7 +108,7 @@ func Run(in io.Reader, out io.Writer) error {
 	if err = cmd.Start(); err != nil {
 		return launchError(w, false, err)
 	}
-	_ = w.Emit("started", map[string]any{"pid": cmd.Process.Pid, "uid": os.Getuid(), "euid": os.Geteuid()})
+	_ = w.Emit("started", map[string]any{"pid": cmd.Process.Pid, "supervisorUid": os.Getuid(), "supervisorEuid": os.Geteuid()})
 	_ = w.Emit("prompt", map[string]any{"data": prompt(launch.Cwd)})
 	if launch.Command != "" {
 		_ = w.Emit("display", map[string]any{"data": "\r\x1b[2K" + prompt(launch.Cwd) + strings.ReplaceAll(launch.Command, "\n", "\r\n") + "\r\n"})

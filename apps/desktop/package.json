@@ -6,8 +6,8 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "package": "electron-vite build && electron-builder --dir"
+    "build": "node ../../scripts/build-native-helper.mjs && electron-vite build",
+    "package": "node ../../scripts/build-native-helper.mjs && electron-vite build && electron-builder --dir"
   },
   "dependencies": {
     "@cloudhelm/adapters": "workspace:*",

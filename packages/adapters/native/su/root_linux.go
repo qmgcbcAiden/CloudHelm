@@ -35,17 +35,8 @@ func Root(socket, token, digest, directory string) error {
 	if err != nil || self != filepath.Join(directory, "helper") {
 		return errors.New("invalid-root-image")
 	}
-	stat, err := os.Lstat(directory)
-	if err != nil || !stat.IsDir() || stat.Mode().Perm() != 0700 || stat.Sys().(*syscall.Stat_t).Uid != 0 {
-		return errors.New("invalid-root-directory")
-	}
-	binary, err := os.ReadFile(self)
-	if err != nil {
-		return errors.New("invalid-root-image")
-	}
-	hash := sha256.Sum256(binary)
-	if hex.EncodeToString(hash[:]) != digest {
-		return errors.New("invalid-root-image")
+	if err = validateRootImage(self, directory, digest); err != nil {
+		return err
 	}
 	signal.Ignore(syscall.SIGHUP)
 	null, err := os.OpenFile("/dev/null", os.O_RDWR, 0)
@@ -75,6 +66,7 @@ func Root(socket, token, digest, directory string) error {
 	var processDone chan struct{}
 	var output io.ReadCloser
 	var writer sync.Mutex
+	uncertain := false
 	stop := func() {
 		if input != nil {
 			input.Close()
@@ -84,6 +76,7 @@ func Root(socket, token, digest, directory string) error {
 			select {
 			case <-processDone:
 			case <-time.After(3 * time.Second):
+				uncertain = true
 				// Only terminate the controller. A business child uses a separate
 				// session; its result remains unknown until independently verified.
 				_ = active.Process.Kill()
@@ -168,8 +161,42 @@ func Root(socket, token, digest, directory string) error {
 			}
 		case "end":
 			stop()
+		case "cleanup":
+			if active != nil || uncertain || message.Directory != directory || message.SHA256 != digest {
+				return errors.New("cleanup-unavailable")
+			}
+			if err = validateRootImage(self, directory, digest); err != nil {
+				return err
+			}
+			if err = os.Remove(self); err != nil {
+				return errors.New("cleanup-unavailable")
+			}
+			if err = os.Remove(directory); err != nil {
+				return errors.New("cleanup-unavailable")
+			}
+			return json.NewEncoder(connection).Encode(map[string]string{"type": "cleanup-confirmed", "rootDirectory": directory, "sha256": digest})
 		default:
 			return errors.New("invalid-control")
 		}
 	}
+}
+
+func validateRootImage(self, directory, digest string) error {
+	stat, err := os.Lstat(directory)
+	if err != nil || !stat.IsDir() || stat.Mode().Perm() != 0700 || stat.Sys().(*syscall.Stat_t).Uid != 0 {
+		return errors.New("invalid-root-directory")
+	}
+	image, err := os.Lstat(self)
+	if err != nil || !image.Mode().IsRegular() || image.Mode().Perm() != 0700 || image.Sys().(*syscall.Stat_t).Uid != 0 {
+		return errors.New("invalid-root-image")
+	}
+	binary, err := os.ReadFile(self)
+	if err != nil {
+		return errors.New("invalid-root-image")
+	}
+	hash := sha256.Sum256(binary)
+	if hex.EncodeToString(hash[:]) != digest {
+		return errors.New("invalid-root-image")
+	}
+	return nil
 }
