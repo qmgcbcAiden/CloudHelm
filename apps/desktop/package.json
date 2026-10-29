@@ -51,6 +51,10 @@
     ],
     "extraResources": [
       {
+        "from": "resources/native",
+        "to": "native"
+      },
+      {
         "from": "resources/tree-sitter-bash.wasm",
         "to": "tree-sitter-bash.wasm"
       }

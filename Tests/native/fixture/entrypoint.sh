@@ -1,0 +1,57 @@
+#!/bin/sh
+set -eu
+
+# These public fixture credentials exist only inside the disposable container.
+# Real su/PAM and password-requiring sudo are intentional; no authentication shim.
+printf '%s\n' 'cloudhelm:fixture-login-password' 'root:fixture-root-password' | chpasswd
+mkdir -p /run/sshd /home/cloudhelm/.ssh /home/cloudhelm/runtime
+chmod 700 /home/cloudhelm/.ssh /home/cloudhelm/runtime
+ssh-keygen -q -t ed25519 -N '' -f /home/cloudhelm/.ssh/id_ed25519
+cp /home/cloudhelm/.ssh/id_ed25519.pub /home/cloudhelm/.ssh/authorized_keys
+if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
+  ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key
+fi
+awk '{ print "127.0.0.1 " $1 " " $2 }' /etc/ssh/ssh_host_ed25519_key.pub > /home/cloudhelm/.ssh/known_hosts
+cp /fixture/helper /home/cloudhelm/runtime/helper
+chmod 700 /home/cloudhelm/runtime/helper
+chmod 600 /home/cloudhelm/.ssh/authorized_keys /home/cloudhelm/.ssh/known_hosts
+chown -R cloudhelm:cloudhelm /home/cloudhelm
+chmod 755 /fixture/process.test /fixture/files.test
+
+cat > /etc/ssh/sshd_config <<'SSHD'
+Port 22
+ListenAddress 127.0.0.1
+HostKey /etc/ssh/ssh_host_ed25519_key
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitRootLogin no
+UsePAM yes
+AllowUsers cloudhelm
+PidFile /run/sshd.pid
+LogLevel ERROR
+Subsystem sftp /bin/false
+SSHD
+cat > /etc/sudoers <<'SUDOERS'
+Defaults env_reset,timestamp_timeout=0,passwd_tries=1
+root ALL=(ALL:ALL) ALL
+cloudhelm ALL=(root) PASSWD: /usr/bin/printf allowed
+SUDOERS
+chmod 440 /etc/sudoers
+visudo -c
+sshd=/usr/sbin/sshd
+if [ -x /usr/sbin/sshd.pam ]; then sshd=/usr/sbin/sshd.pam; fi
+"$sshd" -D -e -f /etc/ssh/sshd_config > /tmp/cloudhelm-sshd.log 2>&1 &
+sshd_pid=$!
+trap 'kill "$sshd_pid" 2>/dev/null || true' EXIT
+
+attempt=0
+until su -s /bin/sh cloudhelm -c 'ssh -oBatchMode=yes -oStrictHostKeyChecking=yes -oConnectTimeout=1 cloudhelm@127.0.0.1 true'; do
+  attempt=$((attempt + 1))
+  if [ "$attempt" -ge 20 ]; then cat /tmp/cloudhelm-sshd.log; exit 1; fi
+  sleep 0.1
+done
+
+su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=180s'
+su -s /bin/sh cloudhelm -c '/fixture/files.test -test.v -test.timeout=60s'
+/fixture/files.test -test.v -test.timeout=60s

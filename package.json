@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "pnpm --filter @cloudhelm/desktop dev",
     "build": "pnpm --filter @cloudhelm/desktop build",
+    "build:native": "node scripts/build-native-helper.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "lint": "eslint apps packages scripts Tests",

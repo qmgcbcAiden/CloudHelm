@@ -1,0 +1,7 @@
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    openssh-server openssh-client sudo util-linux bash coreutils passwd libpam-modules \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash cloudhelm
+COPY helper process.test files.test entrypoint.sh /fixture/
+ENTRYPOINT ["/bin/sh", "/fixture/entrypoint.sh"]
