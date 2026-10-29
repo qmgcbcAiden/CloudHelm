@@ -1,0 +1,50 @@
+name: Native SELinux enforcing
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-selinux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  selinux:
+    name: Fedora VM · actual enforcing labels
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: amd64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version: '1.27.3'
+          cache: true
+      - name: Build real label preservation test
+        run: |
+          mkdir -p .cache/selinux
+          go mod verify
+          go test -c -o .cache/selinux/selinux.test ./Tests/native/selinux
+      - name: Install VM tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils
+      - name: Verify official image checksum and exercise enforcing SELinux
+        run: bash Tests/native/fixture/selinux-vm.sh
+      - name: Retain bounded VM diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: native-selinux-diagnostics
+          path: |
+            .cache/selinux/boot.log
+            .cache/selinux/results.log
+          if-no-files-found: ignore
+          retention-days: 7
