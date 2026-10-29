@@ -16,10 +16,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/files"
 	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/protocol"
@@ -452,5 +454,134 @@ func TestCleanupRefusesModifiedRecoveryCopy(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.Directory, "manifest.json")); err != nil {
 		t.Fatal("cleanup removed receipt before validating backup")
+	}
+}
+
+func TestFileGrowthBeyondLimitAfterStagingCannotBeOverwritten(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := request(plan(t, path, "new"), "new")
+	write, scanner, done := staged(t, req)
+	if err := os.Truncate(path, protocol.MaxFile+1); err != nil {
+		t.Fatal(err)
+	}
+	sendCommit(write)
+	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"code":"unsupported"`) || !strings.Contains(scanner.Text(), `"status":"unknown"`) {
+		t.Fatalf("growth beyond limit was not refused: %s", scanner.Text())
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.Stat(path)
+	if err != nil || stat.Size() != protocol.MaxFile+1 {
+		t.Fatalf("overwrote externally grown target: %v", err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	prefix := make([]byte, 3)
+	if _, err := io.ReadFull(file, prefix); err != nil || string(prefix) != "old" {
+		t.Fatalf("changed existing contents after size growth: %q %v", prefix, err)
+	}
+}
+
+func TestMetadataSyscallFailurePreservesOriginal(t *testing.T) {
+	command := exec.Command(os.Args[0], "-test.run=^TestMetadataFailureChild$", "-test.v")
+	command.Env = append(os.Environ(), "CLOUDHELM_FILE_METADATA_CHILD=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("metadata fault fixture failed: %v\n%s", err, output)
+	}
+}
+
+// Linux seccomp injects a real EPERM from fchmod in this child thread only.
+// Production code has no fault switch, and no global filesystem state changes.
+func TestMetadataFailureChild(t *testing.T) {
+	if os.Getenv("CLOUDHELM_FILE_METADATA_CHILD") != "1" {
+		return
+	}
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, []byte("old"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	req := request(plan(t, path, "new"), "new")
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	filter := []unix.SockFilter{
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+		{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, K: uint32(unix.SYS_FCHMOD), Jf: 1},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ALLOW},
+	}
+	program := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
+	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Prctl(unix.PR_SET_SECCOMP, unix.SECCOMP_MODE_FILTER, uintptr(unsafe.Pointer(&program)), 0, 0); err != nil {
+		t.Fatalf("fixture must permit a per-thread seccomp filter: %v", err)
+	}
+	runtime.KeepAlive(filter)
+	result := files.Handle("apply", req)
+	if result.Code != "permission-denied" || result.Status != "unknown" || result.Receipt != nil {
+		t.Fatalf("metadata failure was not refused: %+v", result)
+	}
+	after := files.Handle("inspect", files.Request{Path: path})
+	if after.Status != "inspected" || after.Snapshot.SHA256 != req.Plan.Before.SHA256 || !reflect.DeepEqual(after.Snapshot.Metadata, req.Plan.Before.Metadata) {
+		t.Fatalf("metadata failure changed original: %+v", after)
+	}
+	if recovered := files.Handle("recover", req); recovered.Status != "unknown" || recovered.Code != "original-observed" || recovered.Receipt != nil {
+		t.Fatalf("metadata failure invented a commit: %+v", recovered)
+	}
+}
+
+func TestChangedStagedArtifactsCannotReplaceOriginal(t *testing.T) {
+	for _, artifact := range []string{"new-content", "new-symlink", "new-mode", "backup-content"} {
+		t.Run(artifact, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "file")
+			if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			req := request(plan(t, path, "new"), "new")
+			write, scanner, done := staged(t, req)
+			directory := filepath.Join(root, ".cloudhelm-txn-txn-1")
+			var err error
+			switch artifact {
+			case "new-content":
+				err = os.WriteFile(filepath.Join(directory, "new"), []byte("tampered"), 0600)
+			case "new-mode":
+				err = unix.Chmod(filepath.Join(directory, "new"), 0644)
+			case "backup-content":
+				err = os.WriteFile(filepath.Join(directory, "backup"), []byte("lost original"), 0600)
+			case "new-symlink":
+				outside := filepath.Join(root, "outside")
+				if err = os.WriteFile(outside, []byte("external"), 0600); err == nil {
+					err = os.Remove(filepath.Join(directory, "new"))
+				}
+				if err == nil {
+					err = os.Symlink(outside, filepath.Join(directory, "new"))
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			sendCommit(write)
+			if !scanner.Scan() || !strings.Contains(scanner.Text(), `"status":"unknown"`) {
+				t.Fatalf("tampered staging was not refused: %s", scanner.Text())
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+			observed := files.Handle("inspect", files.Request{Path: path})
+			if observed.Status != "inspected" || observed.Snapshot.SHA256 != req.Plan.Before.SHA256 || !reflect.DeepEqual(observed.Snapshot.Metadata, req.Plan.Before.Metadata) {
+				t.Fatalf("staging tamper replaced original: %+v", observed)
+			}
+			if recovered := files.Handle("recover", req); recovered.Receipt != nil || recovered.Status != "unknown" {
+				t.Fatalf("staging tamper manufactured a receipt: %+v", recovered)
+			}
+		})
 	}
 }

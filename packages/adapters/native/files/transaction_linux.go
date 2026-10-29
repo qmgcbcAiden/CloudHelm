@@ -98,6 +98,58 @@ func locate(result Result, plan *Plan) Result {
 	}
 	return result
 }
+
+type stagedFiles struct{ backup, next *Snapshot }
+
+func sameStaged(a, b stagedFiles) bool {
+	same := func(left, right *Snapshot) bool {
+		if left == nil || right == nil {
+			return left == right
+		}
+		return sameSnapshot(*left, *right)
+	}
+	return same(a.backup, b.backup) && same(a.next, b.next)
+}
+
+func inspectStaged(dir int, req Request) (stagedFiles, error) {
+	var staged stagedFiles
+	read := func(name string) (Snapshot, error) {
+		snapshot, _, err := readSnapshot(dir, name, filepath.Join(directoryPath(req.Plan), name))
+		if err == nil && !snapshot.Exists {
+			err = errConflict
+		}
+		return snapshot, err
+	}
+	if req.Plan.Before.Exists {
+		backup, err := read("backup")
+		if err != nil {
+			return staged, err
+		}
+		if backup.SHA256 != req.Plan.Before.SHA256 || backup.Identity.Size != req.Plan.Before.Identity.Size || !reflect.DeepEqual(backup.Metadata, req.Plan.Before.Metadata) {
+			return staged, errConflict
+		}
+		staged.backup = &backup
+	}
+	if req.Action == "write" {
+		next, err := read("new")
+		if err != nil {
+			return staged, err
+		}
+		if next.SHA256 != req.Plan.ContentSHA256 || next.Identity.Size != int64(req.Plan.ContentSize) {
+			return staged, errConflict
+		}
+		if req.Plan.Before.Metadata != nil {
+			if !reflect.DeepEqual(next.Metadata, req.Plan.Before.Metadata) {
+				return staged, errConflict
+			}
+		} else if next.Metadata.UID != uint32(os.Geteuid()) || next.Metadata.Mode != 0600 {
+			return staged, errConflict
+		}
+		staged.next = &next
+	}
+	return staged, nil
+}
+
 func apply(req Request, beforeCommit func(Result) error) Result {
 	plan := req.Plan
 	content, err := base64.StdEncoding.Strict().DecodeString(req.ContentBase64)
@@ -175,8 +227,17 @@ func apply(req Request, beforeCommit func(Result) error) Result {
 			return locate(failure(e, true), plan)
 		}
 	}
+	staged, err := inspectStaged(dir, req)
+	if err != nil {
+		return locate(failure(err, true), plan)
+	}
 	m.Stage = "staged"
 	if err = writeManifest(dir, m); err != nil {
+		return locate(failure(err, true), plan)
+	}
+	// Make the private transaction directory name durable before advertising
+	// durable staging. Fsync of the child alone does not persist its parent entry.
+	if err = unix.Fsync(parent); err != nil {
 		return locate(failure(err, true), plan)
 	}
 	if err = beforeCommit(locate(Result{Status: "unknown", Effects: "possible", Stage: "staged"}, plan)); err != nil {
@@ -199,6 +260,14 @@ func apply(req Request, beforeCommit func(Result) error) Result {
 			err = errConflict
 		}
 		return locate(failure(err, true), plan)
+	}
+	ready, err := inspectStaged(dir, req)
+	if err != nil {
+		return locate(failure(err, true), plan)
+	}
+	// Bind the actual bytes, attributes and inodes that survived the ACK wait.
+	if !sameStaged(staged, ready) {
+		return locate(failure(errConflict, true), plan)
 	}
 	if req.Action == "delete" {
 		err = unix.Unlinkat(parent, name, 0)

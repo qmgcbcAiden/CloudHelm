@@ -115,16 +115,18 @@ func (a *authServer) authenticate(connection *net.UnixConn) {
 	case value = <-answer:
 	case <-time.After(120 * time.Second):
 	}
-	encoded, _ := json.Marshal(value)
-	_, _ = connection.Write(append(encoded, '\n'))
-	protocol.Clear(encoded)
+	// Close the prior challenge before sudo can ask the next PAM question.
+	// Otherwise concurrent askpass clients may reorder auth-close/auth frames.
+	_ = a.w.Emit("auth-close", map[string]any{"id": id})
 	a.mu.Lock()
 	if a.waiting == id {
 		a.waiting = ""
 		a.answer = nil
 	}
 	a.mu.Unlock()
-	_ = a.w.Emit("auth-close", map[string]any{"id": id})
+	encoded, _ := json.Marshal(value)
+	_, _ = connection.Write(append(encoded, '\n'))
+	protocol.Clear(encoded)
 }
 
 func (a *authServer) Answer(id string, value *string) bool {
