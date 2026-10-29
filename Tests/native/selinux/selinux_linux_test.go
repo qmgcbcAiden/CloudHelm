@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -88,6 +89,14 @@ func TestEnforcingSELinuxLabelSurvivesAtomicReplacement(t *testing.T) {
 	backup, err := os.ReadFile(result.Backup)
 	if err != nil || !bytes.Equal(backup, old) {
 		t.Fatalf("recovery copy mismatch: %v", err)
+	}
+	backupLabel := label(t, result.Backup)
+	if !bytes.Equal(backupLabel, before) {
+		t.Fatalf("backup SELinux label changed: %q -> %q", before, backupLabel)
+	}
+	backupSnapshot := files.Handle("inspect", files.Request{Path: result.Backup})
+	if backupSnapshot.Snapshot == nil || !reflect.DeepEqual(backupSnapshot.Snapshot.Metadata, plan.Before.Metadata) {
+		t.Fatal("recovery copy changed original metadata")
 	}
 	observed := files.Handle("inspect", files.Request{Path: path})
 	if observed.Snapshot == nil || observed.Snapshot.Metadata.UID != plan.Before.Metadata.UID || observed.Snapshot.Metadata.GID != plan.Before.Metadata.GID || observed.Snapshot.Metadata.Mode != plan.Before.Metadata.Mode {

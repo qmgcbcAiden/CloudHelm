@@ -3,6 +3,7 @@ package process
 import (
 	"bufio"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -107,7 +108,8 @@ func (a *authServer) authenticate(connection *net.UnixConn) {
 		}
 		return r
 	}, hello.Prompt)
-	_ = a.w.Emit("auth", map[string]any{"id": id, "prompt": prompt, "mechanism": "sudo", "kind": "unknown"})
+	promptDigest := sha256.Sum256([]byte(hello.Prompt))
+	_ = a.w.Emit("auth", map[string]any{"id": id, "prompt": prompt, "promptSha256": hex.EncodeToString(promptDigest[:]), "mechanism": "sudo", "kind": "unknown"})
 	var value *string
 	select {
 	case value = <-answer:

@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -60,6 +61,7 @@ func TestReplacePreservesMetadataAndReceipt(t *testing.T) {
 	if err != nil || string(backup) != "old" {
 		t.Fatalf("backup: %q %v", backup, err)
 	}
+	assertBackup(t, r, p.Before, "old")
 	recovered := files.Handle("recover", request(p, "new"))
 	if recovered.Status != "succeeded" {
 		t.Fatalf("recover: %+v", recovered)
@@ -71,6 +73,42 @@ func TestReplacePreservesMetadataAndReceipt(t *testing.T) {
 	if _, err = os.Stat(r.Directory); !os.IsNotExist(err) {
 		t.Fatalf("cleanup did not remove private transaction: %v", err)
 	}
+}
+func assertBackup(t *testing.T, result files.Result, before files.Snapshot, content string) {
+	t.Helper()
+	backup := files.Handle("inspect", files.Request{Path: result.Backup})
+	if backup.Status != "inspected" || backup.Snapshot == nil || backup.Snapshot.SHA256 != hash(content) || !reflect.DeepEqual(backup.Snapshot.Metadata, before.Metadata) {
+		t.Fatalf("backup does not preserve original content and metadata: %+v", backup)
+	}
+	var directory unix.Stat_t
+	if err := unix.Stat(result.Directory, &directory); err != nil || directory.Mode&0777 != 0700 || directory.Uid != uint32(os.Geteuid()) {
+		t.Fatalf("recovery directory is not private: %+v %v", directory, err)
+	}
+}
+func TestDeleteRetainsOriginalMetadataInPrivateBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, []byte("old"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if os.Geteuid() == 0 {
+		if err := os.Chown(path, 123, 456); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Setxattr(path, "user.recovery", []byte("recovery-attribute"), 0); err != nil {
+		t.Fatal(err)
+	}
+	p := plan(t, path, "")
+	p.ContentSHA256 = ""
+	req := files.Request{Plan: p, Fingerprint: hash("operation"), Action: "delete"}
+	result := files.Handle("apply", req)
+	if result.Status != "succeeded" || result.Receipt == nil || !result.Receipt.Deleted {
+		t.Fatalf("delete: %+v", result)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("target was not deleted: %v", err)
+	}
+	assertBackup(t, result, p.Before, "old")
 }
 func TestRejectsChangedTargetBeforeAnyStaging(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "file")
@@ -145,6 +183,11 @@ func TestAttributeValuesNeverEnterManifest(t *testing.T) {
 	n, err := unix.Getxattr(path, "user.private", value)
 	if err != nil || !bytes.Equal(value[:n], secret) {
 		t.Fatalf("attribute not preserved: %v", err)
+	}
+	assertBackup(t, r, p.Before, "old")
+	n, err = unix.Getxattr(r.Backup, "user.private", value)
+	if err != nil || !bytes.Equal(value[:n], secret) {
+		t.Fatalf("recovery attribute not preserved: %v", err)
 	}
 }
 func staged(t *testing.T, req files.Request) (*io.PipeWriter, *bufio.Scanner, <-chan error) {
@@ -365,6 +408,11 @@ func TestAccessACLPreservedByDescriptor(t *testing.T) {
 	if err != nil || !bytes.Equal(actual[:n], acl) {
 		t.Fatalf("ACL lost: %v", err)
 	}
+	assertBackup(t, r, p.Before, "old")
+	n, err = unix.Getxattr(r.Backup, "system.posix_acl_access", actual)
+	if err != nil || !bytes.Equal(actual[:n], acl) {
+		t.Fatalf("recovery ACL lost: %v", err)
+	}
 }
 
 func TestCleanupRefusesUnrecognizedObjectsWithoutDeletingReceipt(t *testing.T) {
@@ -383,5 +431,26 @@ func TestCleanupRefusesUnrecognizedObjectsWithoutDeletingReceipt(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(r.Directory, "manifest.json")); err != nil {
 		t.Fatal("cleanup removed receipt before validating directory")
+	}
+}
+
+func TestCleanupRefusesModifiedRecoveryCopy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := request(plan(t, path, "new"), "new")
+	r := files.Handle("apply", req)
+	if r.Status != "succeeded" {
+		t.Fatalf("%+v", r)
+	}
+	if err := os.WriteFile(r.Backup, []byte("changed backup"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if result := files.Handle("cleanup", req); result.Code != "unsupported" || result.Effects != "none" {
+		t.Fatalf("removed modified backup: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(r.Directory, "manifest.json")); err != nil {
+		t.Fatal("cleanup removed receipt before validating backup")
 	}
 }

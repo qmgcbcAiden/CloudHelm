@@ -16,6 +16,12 @@ cp /fixture/helper /home/cloudhelm/runtime/helper
 chmod 700 /home/cloudhelm/runtime/helper
 chmod 600 /home/cloudhelm/.ssh/authorized_keys /home/cloudhelm/.ssh/known_hosts
 chown -R cloudhelm:cloudhelm /home/cloudhelm
+mkdir -p /root/.ssh /root/runtime
+chmod 700 /root/.ssh /root/runtime
+cp /home/cloudhelm/.ssh/authorized_keys /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+cp /fixture/helper /root/runtime/helper
+chmod 700 /root/runtime/helper
 chmod 755 /fixture/process.test /fixture/files.test
 
 cat > /etc/ssh/sshd_config <<'SSHD'
@@ -25,9 +31,9 @@ HostKey /etc/ssh/ssh_host_ed25519_key
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 PubkeyAuthentication yes
-PermitRootLogin no
+PermitRootLogin prohibit-password
 UsePAM yes
-AllowUsers cloudhelm
+AllowUsers cloudhelm root
 PidFile /run/sshd.pid
 LogLevel ERROR
 Subsystem sftp /bin/false
@@ -52,9 +58,16 @@ until su -s /bin/sh cloudhelm -c 'ssh -oBatchMode=yes -oStrictHostKeyChecking=ye
   sleep 0.1
 done
 
+if [ "${CLOUDHELM_FIXTURE_RESTRICTED_ROOT:-}" = 1 ]; then
+  su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_RESTRICTED_ROOT=1 CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=30s -test.run=^TestRestrictedRootCopyFailsBeforeBusiness$'
+  su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_LOGIN=root CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/root/runtime/helper /fixture/process.test -test.v -test.timeout=30s -test.run=^TestDirectRootSSHDoesNotRequireSu$'
+  exit 0
+fi
+
 su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/home/cloudhelm/runtime/helper /fixture/process.test -test.v -test.timeout=180s'
 su -s /bin/sh cloudhelm -c '/fixture/files.test -test.v -test.timeout=60s'
 /fixture/files.test -test.v -test.timeout=60s
+su -s /bin/sh cloudhelm -c 'CLOUDHELM_NATIVE_LOGIN=root CLOUDHELM_NATIVE_SSH=1 CLOUDHELM_HELPER=/root/runtime/helper /fixture/process.test -test.v -test.timeout=30s -test.run=^TestDirectRootSSHDoesNotRequireSu$'
 
 # Run the real distribution PAM password module followed by a real TOTP module.
 # No fake conversation callback is substituted for either authentication stage.

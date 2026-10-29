@@ -27,7 +27,7 @@ type rootHello struct {
 
 // Root only runs from a verified private copy. Its transport is independent of
 // su's authentication tty and no business child inherits that tty.
-func Root(socket, token, digest, directory string) error {
+func Root(socket, token, digest, directory string, brokerPID int) error {
 	if os.Getuid() != 0 || os.Geteuid() != 0 {
 		return errors.New("root-required")
 	}
@@ -57,6 +57,18 @@ func Root(socket, token, digest, directory string) error {
 		return errors.New("root-link-failed")
 	}
 	defer connection.Close()
+	raw, err := connection.SyscallConn()
+	if err != nil || brokerPID < 1 {
+		return errors.New("root-link-failed")
+	}
+	trustedBroker := false
+	_ = raw.Control(func(fd uintptr) {
+		peer, e := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+		trustedBroker = e == nil && int(peer.Pid) == brokerPID
+	})
+	if !trustedBroker {
+		return errors.New("root-link-failed")
+	}
 	if json.NewEncoder(connection).Encode(rootHello{Token: token, UID: os.Getuid(), SHA256: digest}) != nil {
 		return errors.New("root-link-failed")
 	}

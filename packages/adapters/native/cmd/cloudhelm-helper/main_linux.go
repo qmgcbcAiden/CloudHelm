@@ -4,6 +4,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 
 	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/files"
 	"github.com/TianJiaJi/CloudHelm/packages/adapters/native/process"
@@ -28,10 +29,14 @@ func main() {
 		case "--su-broker":
 			err = su.Run(os.Stdin, os.Stdout)
 		case "--su-root":
-			if len(os.Args) != 6 {
+			if len(os.Args) != 7 {
 				os.Exit(2)
 			}
-			err = su.Root(os.Args[2], os.Args[3], os.Args[4], os.Args[5])
+			pid, parseErr := strconv.Atoi(os.Args[6])
+			if parseErr != nil {
+				os.Exit(2)
+			}
+			err = su.Root(os.Args[2], os.Args[3], os.Args[4], os.Args[5], pid)
 		case "--identity":
 			err = json.NewEncoder(os.Stdout).Encode(map[string]any{"protocolVersion": protocol.Version, "uid": os.Getuid(), "euid": os.Geteuid()})
 		case "--version":

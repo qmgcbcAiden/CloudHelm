@@ -76,7 +76,7 @@ mkdir -- ` + quote(directory) + `
 cp -- ` + quote(fmt.Sprintf("/proc/%d/exe", pid)) + ` ` + quote(target) + ` || exit 72
 chmod 700 -- ` + quote(target) + ` || exit 73
 printf '%s\n' ` + quote(digest+"  "+target) + ` | sha256sum -c - >/dev/null || exit 74
-` + quote(target) + ` --su-root ` + quote(socket) + ` ` + quote(token) + ` ` + quote(digest) + ` ` + quote(directory)
+` + quote(target) + ` --su-root ` + quote(socket) + ` ` + quote(token) + ` ` + quote(digest) + ` ` + quote(directory) + ` ` + fmt.Sprint(pid)
 	return script, nil
 }
 

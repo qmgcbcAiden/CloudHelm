@@ -62,7 +62,10 @@ jobs:
         run: |
           set -euo pipefail
           docker build -f "Tests/native/fixture/Dockerfile.$FIXTURE_LIBC" -t cloudhelm-native-fixture .cache/native-fixture
-          docker run --rm --tmpfs /noexec:rw,noexec,nosuid,mode=1777 --tmpfs /readonly:ro,mode=755 cloudhelm-native-fixture 2>&1 | tee .cache/native-fixture/results.log
+          # Full root can read the invoking user's /proc image. Docker omits this
+          # capability by default; the separate negative run verifies refusal.
+          docker run --rm --cap-add SYS_PTRACE --tmpfs /noexec:rw,noexec,nosuid,mode=1777 --tmpfs /readonly:ro,mode=755 cloudhelm-native-fixture 2>&1 | tee .cache/native-fixture/results.log
+          docker run --rm --cap-drop SYS_PTRACE -e CLOUDHELM_FIXTURE_RESTRICTED_ROOT=1 cloudhelm-native-fixture 2>&1 | tee .cache/native-fixture/restricted-root.log
           if grep -q -- '--- SKIP:' .cache/native-fixture/results.log; then
             echo 'Native fixture coverage must not silently skip'; exit 1
           fi

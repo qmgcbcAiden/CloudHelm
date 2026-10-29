@@ -148,7 +148,14 @@ func apply(req Request, beforeCommit func(Result) error) Result {
 		if e != nil {
 			return locate(failure(e, true), plan)
 		}
+		// The private 0700 directory protects the recovery copy even when the
+		// original mode/owner is permissive. Preserve actual attributes here:
+		// the manifest deliberately records only their non-reversible digests.
+		e = copyMetadata(parent, name, fd, before)
 		unix.Close(fd)
+		if e != nil {
+			return locate(failure(e, true), plan)
+		}
 	}
 	if req.Action == "write" {
 		fd, e := writeFileAt(dir, "new", content, 0600)
@@ -324,7 +331,15 @@ func cleanup(req Request) Result {
 	allowed := map[string]bool{"backup": true, "new": true, "manifest.next": true, "manifest.json": true, "lock": true}
 	for _, entry := range entries {
 		var st unix.Stat_t
-		if !allowed[entry] || unix.Fstatat(dir, entry, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) {
+		if !allowed[entry] || unix.Fstatat(dir, entry, &st, unix.AT_SYMLINK_NOFOLLOW) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+			return failure(errUnsupported, false)
+		}
+		if entry == "backup" {
+			backup, _, err := readSnapshot(dir, entry, filepath.Join(directoryPath(req.Plan), entry))
+			if err != nil || !req.Plan.Before.Exists || backup.SHA256 != req.Plan.Before.SHA256 || !reflect.DeepEqual(backup.Metadata, req.Plan.Before.Metadata) {
+				return failure(errUnsupported, false)
+			}
+		} else if st.Uid != uint32(os.Geteuid()) {
 			return failure(errUnsupported, false)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,23 @@ func TestWritableSudoCannotReceiveAuthentication(t *testing.T) {
 		if event["type"] == "auth" || event["type"] == "started" {
 			t.Fatal("untrusted sudo received authentication capability")
 		}
+	}
+}
+
+func TestSudoCarriesRawPromptDigest(t *testing.T) {
+	if os.Getenv("CLOUDHELM_NATIVE_SSH") != "1" {
+		return
+	}
+	p := start(t, "--serve")
+	rawPrompt := "Password:\x01"
+	p.launch([]string{"/usr/bin/sudo", "-A", "-p", rawPrompt, "--", "/usr/bin/printf", "allowed"}, true, "/tmp")
+	challenge := p.wait("auth")
+	if challenge["prompt"] != "Password:" || challenge["promptSha256"] != digest([]byte(rawPrompt)) {
+		t.Fatal("raw prompt identity was lost during display sanitation")
+	}
+	p.send("answer", wire{"id": challenge["id"], "answer": "fixture-login-password"})
+	if p.wait("exit")["code"] != float64(0) {
+		t.Fatal("custom sudo prompt did not authenticate")
 	}
 }
 
@@ -93,5 +111,87 @@ func TestRealMultiStagePAMChallenge(t *testing.T) {
 	}
 	if exit != float64(0) || !strings.HasSuffix(p.output(), "allowed") {
 		t.Fatalf("real PAM password+TOTP failed: exit=%v", exit)
+	}
+}
+
+func TestRestrictedRootCopyFailsBeforeBusiness(t *testing.T) {
+	if os.Getenv("CLOUDHELM_NATIVE_RESTRICTED_ROOT") != "1" {
+		return
+	}
+	password := "fixture-root-password"
+	p, _ := rootConnect(t, &password, "")
+	err := p.wait("error")
+	if err["bootstrapExit"] != float64(72) {
+		t.Fatalf("expected restricted /proc copy rejection, got %v", err["bootstrapExit"])
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, event := range p.all {
+		if event["type"] == "ready" || event["type"] == "output" {
+			t.Fatal("restricted root copy started a business session")
+		}
+	}
+}
+
+func TestDirectRootSSHDoesNotRequireSu(t *testing.T) {
+	if os.Getenv("CLOUDHELM_NATIVE_LOGIN") != "root" {
+		return
+	}
+	p := start(t, "--serve")
+	p.launch(source("id -u"), false, "/root")
+	started := p.wait("started")
+	if started["supervisorUid"] != float64(0) || started["supervisorEuid"] != float64(0) {
+		t.Fatal("root SSH native identity was not UID 0")
+	}
+	if p.wait("exit")["code"] != float64(0) || p.output() != "0\r\n" {
+		t.Fatal("direct root SSH command failed")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, event := range p.all {
+		if event["type"] == "auth" {
+			t.Fatal("direct root SSH incorrectly requested su/sudo authentication")
+		}
+	}
+}
+
+func TestRootRejectsReplacementBrokerSocket(t *testing.T) {
+	if os.Getenv("CLOUDHELM_NATIVE_SSH") != "1" {
+		return
+	}
+	p := start(t, "--su-broker")
+	content, err := os.ReadFile(helper(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := fmt.Sprintf("/tmp/cloudhelm-root-replacement-%d", time.Now().UnixNano())
+	p.send("connect", wire{"payload": wire{"rootDirectory": directory, "sha256": digest(content)}})
+	auth := p.wait("auth")
+	paths, err := filepath.Glob(filepath.Join(filepath.Dir(helper(t)), "su-*.sock"))
+	if err != nil || len(paths) != 1 {
+		t.Fatalf("cannot identify isolated broker socket: %v", err)
+	}
+	if err = os.Remove(paths[0]); err != nil {
+		t.Fatal(err)
+	}
+	rogue, err := net.ListenUnix("unix", &net.UnixAddr{Name: paths[0], Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rogue.Close()
+	rogue.SetDeadline(time.Now().Add(10 * time.Second))
+	p.send("answer", wire{"id": auth["id"], "answer": "fixture-root-password"})
+	connection, err := rogue.AcceptUnix()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var data [1]byte
+	if n, _ := connection.Read(data[:]); n != 0 {
+		t.Fatal("root trusted a replacement broker before checking peer PID")
+	}
+	if p.wait("error")["code"] != "authentication-unconfirmed" {
+		t.Fatal("replacement broker became ready")
 	}
 }

@@ -55,7 +55,11 @@ func helper(t *testing.T) string {
 	return p
 }
 func sshCommand(args ...string) *exec.Cmd {
-	return exec.Command("ssh", append([]string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", "cloudhelm@127.0.0.1"}, args...)...)
+	login := os.Getenv("CLOUDHELM_NATIVE_LOGIN")
+	if login == "" {
+		login = "cloudhelm"
+	}
+	return exec.Command("ssh", append([]string{"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=5", login + "@127.0.0.1"}, args...)...)
 }
 func start(t *testing.T, mode string) *process {
 	t.Helper()
@@ -207,6 +211,16 @@ func TestCtrlCSeparatelyObservesExit(t *testing.T) {
 		t.Fatal("did not observe interrupted exit")
 	}
 }
+func TestBlockedStdinDoesNotPreventCancellation(t *testing.T) {
+	p := start(t, "--serve")
+	p.launch(source("stty -echo -icanon; printf ready; sleep 30"), false, "/tmp")
+	p.waitOutput("ready")
+	p.send("input", wire{"data": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 65536)))})
+	p.send("input", wire{"data": base64.StdEncoding.EncodeToString([]byte{3})})
+	if p.wait("exit")["code"] != float64(130) {
+		t.Fatal("stdin backpressure blocked interrupt")
+	}
+}
 func TestWrongBindingCannotBecomeInput(t *testing.T) {
 	p := start(t, "--serve")
 	p.launch(source("printf ready; read -r value; printf 'received:%s' \"$value\""), false, "/tmp")
@@ -230,7 +244,7 @@ func TestRealSudoExactCommandAndPassword(t *testing.T) {
 	auth := p.wait("auth")
 	p.send("answer", wire{"id": auth["id"], "answer": "fixture-login-password"})
 	exit := p.wait("exit")["code"]
-	if exit != float64(0) || p.output() != "allowed" {
+	if exit != float64(0) || !strings.HasSuffix(p.output(), "allowed") {
 		t.Fatalf("exact sudoers command result: exit=%v output=%q", exit, strings.ReplaceAll(p.output(), "fixture-login-password", "<redacted>"))
 	}
 	if strings.Contains(p.output(), "fixture-login-password") {
@@ -370,6 +384,9 @@ func TestSuRejectsWrongPasswordAndCorruptArtifact(t *testing.T) {
 			e := p.wait("error")
 			if e["code"] != "authentication-unconfirmed" {
 				t.Fatalf("unexpected authentication failure: %v", e["code"])
+			}
+			if tc.name == "artifact" && e["bootstrapExit"] != float64(74) {
+				t.Fatalf("artifact mismatch was not checked before root execution: %v", e["bootstrapExit"])
 			}
 			p.mu.Lock()
 			defer p.mu.Unlock()

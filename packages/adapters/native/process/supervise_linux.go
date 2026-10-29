@@ -100,7 +100,13 @@ func Run(in io.Reader, out io.Writer) error {
 	}
 	defer master.Close()
 	defer slave.Close()
-	if err = pty.Setsize(master, &pty.Winsize{Rows: launch.Rows, Cols: launch.Cols}); err != nil {
+	masterFD := int(master.Fd())
+	if err = unix.SetNonblock(masterFD, true); err != nil {
+		return launchError(w, false, err)
+	}
+	input := &ptyInput{fd: masterFD}
+	defer input.clear()
+	if err = unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &unix.Winsize{Row: launch.Rows, Col: launch.Cols}); err != nil {
 		return launchError(w, false, err)
 	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
@@ -135,7 +141,7 @@ func Run(in io.Reader, out io.Writer) error {
 		exited <- code
 	}()
 	outputDone := make(chan int, 1)
-	go readOutput(master, exited, outputDone, w)
+	go readOutput(masterFD, exited, outputDone, w)
 	controls := make(chan control)
 	inputDone := make(chan struct{})
 	done := make(chan struct{})
@@ -154,8 +160,14 @@ func Run(in io.Reader, out io.Writer) error {
 			}
 		}
 	}()
+	writeTick := time.NewTicker(20 * time.Millisecond)
+	defer writeTick.Stop()
 	for {
 		select {
+		case <-writeTick.C:
+			if err := input.flush(); err != nil {
+				return err
+			}
 		case code := <-outputDone:
 			return w.Emit("exit", map[string]any{"code": code})
 		case <-inputDone:
@@ -169,20 +181,24 @@ func Run(in io.Reader, out io.Writer) error {
 					return errors.New("invalid-control")
 				}
 				if len(data) == 1 && data[0] == 3 {
+					input.clear()
 					_ = unix.Kill(-cmd.Process.Pid, unix.SIGINT)
 				} else {
-					_, _ = master.Write(data)
+					if err := input.append(data); err != nil {
+						return err
+					}
 				}
 			case "resize":
 				if message.Rows < 1 || message.Rows > 1000 || message.Cols < 1 || message.Cols > 1000 {
 					return errors.New("invalid-window")
 				}
-				_ = pty.Setsize(master, &pty.Winsize{Rows: message.Rows, Cols: message.Cols})
+				_ = unix.IoctlSetWinsize(masterFD, unix.TIOCSWINSZ, &unix.Winsize{Row: message.Rows, Col: message.Cols})
 			case "answer":
 				if auth == nil || !auth.Answer(message.ID, message.Answer) {
 					return errors.New("stale-answer")
 				}
 			case "cancel":
+				input.clear()
 				if auth != nil {
 					auth.Cancel()
 				}
@@ -238,7 +254,7 @@ func prompt(cwd string) string {
 	return clean(name) + "@" + clean(host) + ":" + clean(cwd) + suffix
 }
 
-func readOutput(master *os.File, exited <-chan int, done chan<- int, w *protocol.Writer) {
+func readOutput(masterFD int, exited <-chan int, done chan<- int, w *protocol.Writer) {
 	buffer := make([]byte, 8192)
 	code, finished, quiet := 0, false, 0
 	for {
@@ -249,7 +265,7 @@ func readOutput(master *os.File, exited <-chan int, done chan<- int, w *protocol
 			default:
 			}
 		}
-		poll := []unix.PollFd{{Fd: int32(master.Fd()), Events: unix.POLLIN}}
+		poll := []unix.PollFd{{Fd: int32(masterFD), Events: unix.POLLIN}}
 		ready, err := unix.Poll(poll, 100)
 		if errors.Is(err, unix.EINTR) {
 			continue
@@ -259,7 +275,7 @@ func readOutput(master *os.File, exited <-chan int, done chan<- int, w *protocol
 			return
 		}
 		if ready > 0 && poll[0].Revents&unix.POLLIN != 0 {
-			count, readErr := master.Read(buffer)
+			count, readErr := unix.Read(masterFD, buffer)
 			if count > 0 {
 				_ = w.Emit("data", map[string]any{"dataBase64": base64.StdEncoding.EncodeToString(buffer[:count])})
 				quiet = 0
